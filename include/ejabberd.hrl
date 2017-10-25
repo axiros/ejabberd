@@ -51,7 +51,7 @@
 
 -type scram() :: #scram{}.
 
--define(SCRAM_DEFAULT_ITERATION_COUNT, 4096).
+-define(SCRAM_DEFAULT_ITERATION_COUNT, 2).
 
 -ifdef(ERL_DEPRECATED_TYPES).
 

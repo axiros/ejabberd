@@ -5,7 +5,7 @@
 %%% Created :  5 Jan 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -375,6 +375,7 @@ remove_msg_by_node(To, Seq) ->
 
 -spec need_to_store(binary(), message()) -> boolean().
 need_to_store(_LServer, #message{type = error}) -> false;
+need_to_store(_LServer, #message{type = groupchat}) -> false;
 need_to_store(LServer, #message{type = Type} = Packet) ->
     case xmpp:has_subtag(Packet, #offline{}) of
 	false ->
@@ -383,7 +384,7 @@ need_to_store(LServer, #message{type = Type} = Packet) ->
 		    true;
 		no_store ->
 		    false;
-		none when Type == headline; Type == groupchat ->
+		none when Type == headline ->
 		    false;
 		none ->
 		    case gen_mod:get_module_opt(

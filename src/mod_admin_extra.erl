@@ -5,7 +5,7 @@
 %%% Created : 10 Aug 2008 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -93,8 +93,13 @@
 start(_Host, _Opts) ->
     ejabberd_commands:register_commands(get_commands_spec()).
 
-stop(_Host) ->
-    ejabberd_commands:unregister_commands(get_commands_spec()).
+stop(Host) ->
+    case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
+	false ->
+	    ejabberd_commands:unregister_commands(get_commands_spec());
+	true ->
+	    ok
+    end.
 
 reload(_Host, _NewOpts, _OldOpts) ->
     ok.
@@ -1536,6 +1541,7 @@ send_message(Type, From, To, Subject, Body) ->
 build_packet(Type, Subject, Body) ->
     #message{type = misc:binary_to_atom(Type),
 	     body = xmpp:mk_text(Body),
+	     id = randoms:get_string(),
 	     subject = xmpp:mk_text(Subject)}.
 
 send_stanza(FromString, ToString, Stanza) ->
@@ -1569,14 +1575,13 @@ send_stanza_c2s(Username, Host, Resource, Stanza) ->
     end.
 
 privacy_set(Username, Host, QueryS) ->
-    From = jid:make(Username, Host),
-    To = jid:make(Host),
+    Jid = jid:make(Username, Host),
     QueryEl = fxml_stream:parse_element(QueryS),
     SubEl = xmpp:decode(QueryEl),
     IQ = #iq{type = set, id = <<"push">>, sub_els = [SubEl],
-	     from = From, to = To},
-    mod_privacy:process_iq(IQ),
-    ok.
+	     from = Jid, to = Jid},
+    Result = mod_privacy:process_iq(IQ),
+    Result#iq.type == result.
 
 %%%
 %%% Stats

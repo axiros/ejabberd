@@ -5,7 +5,7 @@
 %%% Created :  8 Dec 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -95,7 +95,7 @@ stream_feature_register(Acc, Host) ->
 c2s_unauthenticated_packet(#{ip := IP, server := Server} = State,
 			   #iq{type = T, sub_els = [_]} = IQ)
   when T == set; T == get ->
-    case xmpp:get_subtag(IQ, #register{}) of
+    try xmpp:try_subtag(IQ, #register{}) of
 	#register{} = Register ->
 	    {Address, _} = IP,
 	    IQ1 = xmpp:set_els(IQ, [Register]),
@@ -105,6 +105,11 @@ c2s_unauthenticated_packet(#{ip := IP, server := Server} = State,
 	    {stop, ejabberd_c2s:send(State, ResIQ1)};
 	false ->
 	    State
+    catch _:{xmpp_codec, Why} ->
+	    Txt = xmpp:io_format_error(Why),
+	    Lang = maps:get(lang, State),
+	    Err = xmpp:make_error(IQ, xmpp:err_bad_request(Txt, Lang)),
+	    {stop, ejabberd_c2s:send(State, Err)}
     end;
 c2s_unauthenticated_packet(State, _) ->
     State.
@@ -334,6 +339,10 @@ try_register(User, Server, Password, SourceRaw, Lang) ->
 							    Password)
 				of
 			      ok ->
+				  ?INFO_MSG("The account ~s was registered "
+					    "from IP address ~s",
+					    [jid:encode({User, Server, <<"">>}),
+					     ip_to_string(Source)]),
 				  send_welcome_message(JID),
 				  send_registration_notifications(
                                     ?MODULE, JID, Source),
@@ -492,6 +501,8 @@ remove_timeout(Source) ->
        true -> ok
     end.
 
+ip_to_string({_, _, _} = USR) ->
+    jid:encode(USR);
 ip_to_string(Source) when is_tuple(Source) ->
     misc:ip_to_list(Source);
 ip_to_string(undefined) -> <<"undefined">>;

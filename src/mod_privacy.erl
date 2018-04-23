@@ -5,7 +5,7 @@
 %%% Created : 21 Jul 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -353,7 +353,7 @@ process_lists_set(#iq{from = #jid{luser = LUser, lserver = LServer} = From,
 		      lang = Lang} = IQ, Name, Items) ->
     case catch lists:map(fun decode_item/1, Items) of
 	{error, Why} ->
-	    Txt = xmpp:format_error(Why),
+	    Txt = xmpp:io_format_error(Why),
 	    xmpp:make_error(IQ, xmpp:err_bad_request(Txt, Lang));
 	List ->
 	    case set_list(LUser, LServer, Name, List) of

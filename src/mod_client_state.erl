@@ -5,7 +5,7 @@
 %%% Created : 11 Sep 2014 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2014-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2014-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -265,7 +265,10 @@ filter_other({Stanza, #{jid := JID} = C2SState} = Acc) when ?is_stanza(Stanza) -
 	    Acc;
 	_ ->
 	    ?DEBUG("Won't add stanza for ~s to CSI queue", [jid:encode(JID)]),
-	    From = xmpp:get_from(Stanza),
+	    From = case xmpp:get_from(Stanza) of
+		       undefined -> JID;
+		       F -> F
+		   end,
 	    C2SState1 = dequeue_sender(From, C2SState),
 	    {Stanza, C2SState1}
     end;

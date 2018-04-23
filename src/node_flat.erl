@@ -5,7 +5,7 @@
 %%% Created :  1 Dec 2007 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -88,7 +88,6 @@ options() ->
 	{max_payload_size, ?MAX_PAYLOAD_SIZE},
 	{send_last_published_item, on_sub_and_presence},
 	{deliver_notifications, true},
-        {title, <<>>},
 	{presence_based_delivery, false},
 	{itemreply, none}].
 
@@ -104,8 +103,10 @@ features() ->
 	<<"modify-affiliations">>,
 	<<"outcast-affiliation">>,
 	<<"persistent-items">>,
+	<<"multi-items">>,
 	<<"publish">>,
 	<<"publish-only-affiliation">>,
+	<<"publish-options">>,
 	<<"purge-nodes">>,
 	<<"retract-items">>,
 	<<"retrieve-affiliations">>,
@@ -446,21 +447,30 @@ delete_item(Nidx, Publisher, PublishModel, ItemId) ->
 		    case Affiliation of
 			owner ->
 			    {result, States} = get_states(Nidx),
+			    Records = States ++ mnesia:read({pubsub_orphan, Nidx}),
 			    lists:foldl(fun
-				    (#pubsub_state{items = PI} = S, Res) ->
-					case lists:member(ItemId, PI) of
+				    (#pubsub_state{items = RI} = S, Res) ->
+					case lists:member(ItemId, RI) of
 					    true ->
-						Nitems = lists:delete(ItemId, PI),
+						NI = lists:delete(ItemId, RI),
 						del_item(Nidx, ItemId),
-						set_state(S#pubsub_state{items = Nitems}),
+						mnesia:write(S#pubsub_state{items = NI}),
 						{result, {default, broadcast}};
 					    false ->
 						Res
 					end;
-				    (_, Res) ->
-					Res
+				    (#pubsub_orphan{items = RI} = S, Res) ->
+					case lists:member(ItemId, RI) of
+					    true ->
+						NI = lists:delete(ItemId, RI),
+						del_item(Nidx, ItemId),
+						mnesia:write(S#pubsub_orphan{items = NI}),
+						{result, {default, broadcast}};
+					    false ->
+						Res
+					end
 				end,
-				{error, xmpp:err_item_not_found()}, States);
+				{error, xmpp:err_item_not_found()}, Records);
 			_ ->
 			    {error, xmpp:err_forbidden()}
 		    end
@@ -565,17 +575,10 @@ get_entity_subscriptions(Host, Owner) ->
 get_node_subscriptions(Nidx) ->
     {result, States} = get_states(Nidx),
     Tr = fun (#pubsub_state{stateid = {J, _}, subscriptions = Subscriptions}) ->
-	    case Subscriptions of
-		[_ | _] ->
-		    lists:foldl(fun ({S, SubId}, Acc) ->
-				[{J, S, SubId} | Acc]
-			end,
-			[], Subscriptions);
-		[] ->
-		    [];
-		_ ->
-		    [{J, none}]
-	    end
+	    lists:foldl(fun ({S, SubId}, Acc) ->
+			[{J, S, SubId} | Acc]
+		end,
+		[], Subscriptions)
     end,
     {result, lists:flatmap(Tr, States)}.
 
@@ -731,14 +734,7 @@ del_state(#pubsub_state{stateid = {Key, Nidx}, items = Items}) ->
 get_items(Nidx, _From, undefined) ->
     RItems = lists:keysort(#pubsub_item.creation,
 			   mnesia:index_read(pubsub_item, Nidx, #pubsub_item.nodeidx)),
-    Count = length(RItems),
-    if Count =< ?MAXITEMS ->
-	 {result, {RItems, undefined}};
-       true ->
-	 ItemsPage = lists:sublist(RItems, ?MAXITEMS),
-	 Rsm = rsm_page(Count, 0, 0, ItemsPage),
-	 {result, {ItemsPage, Rsm}}
-    end;
+    {result, {RItems, undefined}};
 
 get_items(Nidx, _From, #rsm_set{max = Max, index = IncIndex,
 				'after' = After, before = Before}) ->

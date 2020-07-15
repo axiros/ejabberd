@@ -4,7 +4,7 @@
 %%% Created :  9 Mar 2015 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,7 +24,6 @@
 
 -module(ejabberd_sm_sql).
 
--compile([{parse_transform, ejabberd_sql_pt}]).
 
 -behaviour(ejabberd_sm).
 
@@ -36,7 +35,6 @@
 	 get_sessions/1,
 	 get_sessions/2]).
 
--include("ejabberd.hrl").
 -include("ejabberd_sm.hrl").
 -include("logger.hrl").
 -include("ejabberd_sql_pt.hrl").
@@ -55,8 +53,8 @@ init() ->
 		  {updated, _} ->
 		      ok;
 		  Err ->
-		      ?ERROR_MSG("failed to clean 'sm' table: ~p", [Err]),
-		      Err
+		      ?ERROR_MSG("Failed to clean 'sm' table: ~p", [Err]),
+		      {error, db_failure}
 	      end;
 	 (_, Err) ->
 	      Err

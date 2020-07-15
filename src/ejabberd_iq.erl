@@ -1,11 +1,11 @@
 %%%-------------------------------------------------------------------
 %%% File    : ejabberd_iq.erl
 %%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% Purpose : 
+%%% Purpose :
 %%% Created : 10 Nov 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -36,6 +36,7 @@
 
 -include("xmpp.hrl").
 -include("logger.hrl").
+-include("ejabberd_stacktrace.hrl").
 
 -record(state, {expire = infinity :: timeout()}).
 -type state() :: #state{}.
@@ -49,7 +50,7 @@ start_link() ->
 -spec route(iq(), atom() | pid(), term(), non_neg_integer()) -> ok.
 route(#iq{type = T} = IQ, Proc, Ctx, Timeout) when T == set; T == get ->
     Expire = current_time() + Timeout,
-    Rnd = randoms:get_string(),
+    Rnd = p1_rand:get_string(),
     ID = encode_id(Expire, Rnd),
     ets:insert(?MODULE, {{Expire, Rnd}, Proc, Ctx}),
     gen_server:cast(?MODULE, {restart_timer, Expire}),
@@ -70,17 +71,18 @@ dispatch(_) ->
 %%% gen_server callbacks
 %%%===================================================================
 init([]) ->
-    ets:new(?MODULE, [named_table, ordered_set, public]),
+    _ = ets:new(?MODULE, [named_table, ordered_set, public]),
     {ok, #state{}}.
 
 handle_call(Request, From, State) ->
-    {stop, {unexpected_call, Request, From}, State}.
+    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
+    noreply(State).
 
 handle_cast({restart_timer, Expire}, State) ->
     State1 = State#state{expire = min(Expire, State#state.expire)},
     noreply(State1);
 handle_cast(Msg, State) ->
-    ?WARNING_MSG("unexpected cast: ~p", [Msg]),
+    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
     noreply(State).
 
 handle_info({route, IQ, Key}, State) ->
@@ -96,7 +98,7 @@ handle_info(timeout, State) ->
     Expire = clean(ets:first(?MODULE)),
     noreply(State#state{expire = Expire});
 handle_info(Info, State) ->
-    ?WARNING_MSG("unexpected info: ~p", [Info]),
+    ?WARNING_MSG("Unexpected info: ~p", [Info]),
     noreply(State).
 
 terminate(_Reason, _State) ->
@@ -110,7 +112,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 -spec current_time() -> non_neg_integer().
 current_time() ->
-    p1_time_compat:system_time(milli_seconds).
+    erlang:system_time(millisecond).
 
 -spec clean({non_neg_integer(), binary()} | '$end_of_table')
 	   -> non_neg_integer() | infinity.
@@ -144,7 +146,7 @@ noreply(#state{expire = Expire} = State) ->
 -spec encode_id(non_neg_integer(), binary()) -> binary().
 encode_id(Expire, Rnd) ->
     ExpireBin = integer_to_binary(Expire),
-    Node = atom_to_binary(node(), utf8),
+    Node = ejabberd_cluster:node_id(),
     CheckSum = calc_checksum(<<ExpireBin/binary, Rnd/binary, Node/binary>>),
     <<"rr-", ExpireBin/binary, $-, Rnd/binary, $-, CheckSum/binary, $-, Node/binary>>.
 
@@ -155,7 +157,7 @@ decode_id(<<"rr-", ID/binary>>) ->
 	[Rnd, Rest] = binary:split(Tail, <<"-">>),
 	[CheckSum, NodeBin] = binary:split(Rest, <<"-">>),
 	CheckSum = calc_checksum(<<ExpireBin/binary, Rnd/binary, NodeBin/binary>>),
-	Node = erlang:binary_to_existing_atom(NodeBin, utf8),
+	Node = ejabberd_cluster:get_node_by_id(NodeBin),
 	Expire = binary_to_integer(ExpireBin),
 	{ok, Expire, Rnd, Node}
     catch _:{badmatch, _} ->
@@ -166,11 +168,21 @@ decode_id(_) ->
 
 -spec calc_checksum(binary()) -> binary().
 calc_checksum(Data) ->
-    Key = ejabberd_config:get_option(shared_key),
+    Key = ejabberd_config:get_shared_key(),
     base64:encode(crypto:hash(sha, <<Data/binary, Key/binary>>)).
 
 -spec callback(atom() | pid(), #iq{} | timeout, term()) -> any().
 callback(undefined, IQRes, Fun) ->
-    Fun(IQRes);
+    try Fun(IQRes)
+    catch ?EX_RULE(Class, Reason, St) ->
+	    StackTrace = ?EX_STACK(St),
+	    ?ERROR_MSG("Failed to process iq response:~n~ts~n** ~ts",
+		       [xmpp:pp(IQRes),
+			misc:format_exception(2, Class, Reason, StackTrace)])
+    end;
 callback(Proc, IQRes, Ctx) ->
-    Proc ! {iq_reply, IQRes, Ctx}.
+    try
+        Proc ! {iq_reply, IQRes, Ctx}
+    catch _:badarg ->
+        ok
+    end.

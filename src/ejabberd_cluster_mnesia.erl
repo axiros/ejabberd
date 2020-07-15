@@ -5,7 +5,7 @@
 %%% Created : 7 Oct 2015 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -31,7 +31,6 @@
 	 get_known_nodes/0, node_id/0, get_node_by_id/1,
 	 send/2, wait_for_sync/1, subscribe/1]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 
 -spec init() -> ok.
@@ -137,7 +136,7 @@ replicate_database(Node) ->
     mnesia:change_table_copy_type(schema, node(), disc_copies),
     lists:foreach(
         fun(Table) ->
-            Type = ejabberd_cluster:call(Node, mnesia, table_info, [Table, storage_type]),
+            Type = rpc:call(Node, mnesia, table_info, [Table, storage_type]),
             mnesia:add_table_copy(Table, node(), Type)
         end, mnesia:system_info(tables)--[schema]).
 

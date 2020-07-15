@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : mod_bosh_redis.erl
 %%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% Purpose : 
+%%% Purpose :
 %%% Created : 28 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2018   ProcessOne
+%%% ejabberd, Copyright (C) 2017-2020   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -34,7 +34,6 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2,
 	 terminate/2, code_change/3, start_link/0]).
 
--include("ejabberd.hrl").
 -include("logger.hrl").
 -include("bosh.hrl").
 
@@ -90,7 +89,7 @@ find_session(SID) ->
 	    try
 		{ok, binary_to_term(Pid)}
 	    catch _:badarg ->
-		    ?ERROR_MSG("malformed data in redis (key = '~s'): ~p",
+		    ?ERROR_MSG("Malformed data in redis (key = '~ts'): ~p",
 			       [SID, Pid]),
 		    {error, db_failure}
 	    end;
@@ -108,18 +107,19 @@ init([]) ->
     clean_table(),
     {ok, #state{}}.
 
-handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+handle_call(Request, From, State) ->
+    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
+    {noreply, State}.
 
-handle_cast(_Msg, State) ->
+handle_cast(Msg, State) ->
+    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
     {noreply, State}.
 
 handle_info({redis_message, ?BOSH_KEY, SID}, State) ->
     ets_cache:delete(?BOSH_CACHE, SID),
     {noreply, State};
 handle_info(Info, State) ->
-    ?ERROR_MSG("unexpected info: ~p", [Info]),
+    ?WARNING_MSG("Unexpected info: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -146,5 +146,5 @@ clean_table() ->
 	      end),
 	    ok;
 	{error, _} ->
-	    ?ERROR_MSG("failed to clean bosh sessions in redis", [])
+	    ?ERROR_MSG("Failed to clean bosh sessions in redis", [])
     end.

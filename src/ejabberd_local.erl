@@ -5,7 +5,7 @@
 %%% Created : 30 Nov 2002 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -32,8 +32,10 @@
 %% API
 -export([start/0, start_link/0]).
 
--export([route/1,
+-export([route/1, process_iq/1,
 	 get_features/1,
+	 register_iq_handler/5,
+	 unregister_iq_handler/2,
 	 bounce_resource_packet/1,
 	 host_up/1, host_down/1]).
 
@@ -45,13 +47,14 @@
 -export([route_iq/2, route_iq/3]).
 -deprecated([{route_iq, 2}, {route_iq, 3}]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("xmpp.hrl").
--include("ejabberd_stacktrace.hrl").
--include("translate.hrl").
 
 -record(state, {}).
+
+-define(IQTABLE, local_iqtable).
 
 %%====================================================================
 %% API
@@ -69,20 +72,36 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [],
 			  []).
 
--spec route(stanza()) -> ok.
+-spec process_iq(iq()) -> any().
+process_iq(#iq{to = To, type = T, lang = Lang, sub_els = [El]} = Packet)
+  when T == get; T == set ->
+    XMLNS = xmpp:get_ns(El),
+    Host = To#jid.lserver,
+    case ets:lookup(?IQTABLE, {Host, XMLNS}) of
+	[{_, Module, Function, Opts}] ->
+	    gen_iq_handler:handle(Host, Module, Function, Opts, Packet);
+	[] ->
+	    Txt = <<"No module is handling this query">>,
+	    Err = xmpp:err_service_unavailable(Txt, Lang),
+	    ejabberd_router:route_error(Packet, Err)
+    end;
+process_iq(#iq{type = T, lang = Lang, sub_els = SubEls} = Packet)
+  when T == get; T == set ->
+    Txt = case SubEls of
+	      [] -> <<"No child elements found">>;
+	      _ -> <<"Too many child elements">>
+	  end,
+    Err = xmpp:err_bad_request(Txt, Lang),
+    ejabberd_router:route_error(Packet, Err);
+process_iq(#iq{type = T}) when T == result; T == error ->
+    ok.
+
+-spec route(stanza()) -> any().
 route(Packet) ->
-    ?DEBUG("Local route:~n~ts", [xmpp:pp(Packet)]),
-    Type = xmpp:get_type(Packet),
-    To = xmpp:get_to(Packet),
-    if To#jid.luser /= <<"">> ->
-	    ejabberd_sm:route(Packet);
-       is_record(Packet, iq), To#jid.lresource == <<"">> ->
-	    gen_iq_handler:handle(?MODULE, Packet);
-       Type == result; Type == error ->
-	    ok;
-       true ->
-	    ejabberd_hooks:run(local_send_to_resource_hook,
-			       To#jid.lserver, [Packet])
+    try do_route(Packet)
+    catch E:R ->
+	    ?ERROR_MSG("failed to route packet:~n~s~nReason = ~p",
+		       [xmpp:pp(Packet), {E, {R, erlang:get_stacktrace()}}])
     end.
 
 -spec route_iq(iq(), function()) -> ok.
@@ -93,6 +112,16 @@ route_iq(IQ, Fun) ->
 route_iq(IQ, Fun, Timeout) ->
     ejabberd_router:route_iq(IQ, Fun, undefined, Timeout).
 
+-spec register_iq_handler(binary(), binary(), module(), function(),
+			  gen_iq_handler:opts()) -> ok.
+register_iq_handler(Host, XMLNS, Module, Fun, Opts) ->
+    gen_server:cast(?MODULE,
+		    {register_iq_handler, Host, XMLNS, Module, Fun, Opts}).
+
+-spec unregister_iq_handler(binary(), binary()) -> ok.
+unregister_iq_handler(Host, XMLNS) ->
+    gen_server:cast(?MODULE, {unregister_iq_handler, Host, XMLNS}).
+
 -spec bounce_resource_packet(stanza()) -> ok | stop.
 bounce_resource_packet(#presence{to = #jid{lresource = <<"">>}}) ->
     ok;
@@ -100,14 +129,19 @@ bounce_resource_packet(#message{to = #jid{lresource = <<"">>}, type = headline})
     ok;
 bounce_resource_packet(Packet) ->
     Lang = xmpp:get_lang(Packet),
-    Txt = ?T("No available resource found"),
+    Txt = <<"No available resource found">>,
     Err = xmpp:err_item_not_found(Txt, Lang),
     ejabberd_router:route_error(Packet, Err),
     stop.
 
 -spec get_features(binary()) -> [binary()].
 get_features(Host) ->
-    gen_iq_handler:get_features(?MODULE, Host).
+    get_features(ets:next(?IQTABLE, {Host, <<"">>}), Host, []).
+
+get_features({Host, XMLNS}, Host, XMLNSs) ->
+    get_features(ets:next(?IQTABLE, {Host, XMLNS}), Host, [XMLNS|XMLNSs]);
+get_features(_, _, XMLNSs) ->
+    XMLNSs.
 
 %%====================================================================
 %% gen_server callbacks
@@ -115,30 +149,43 @@ get_features(Host) ->
 
 init([]) ->
     process_flag(trap_exit, true),
-    lists:foreach(fun host_up/1, ejabberd_option:hosts()),
+    lists:foreach(fun host_up/1, ?MYHOSTS),
     ejabberd_hooks:add(host_up, ?MODULE, host_up, 10),
     ejabberd_hooks:add(host_down, ?MODULE, host_down, 100),
-    gen_iq_handler:start(?MODULE),
+    catch ets:new(?IQTABLE, [named_table, public, ordered_set,
+			     {read_concurrency, true}]),
     update_table(),
     {ok, #state{}}.
 
-handle_call(Request, From, State) ->
-    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
-    {noreply, State}.
+handle_call(_Request, _From, State) ->
+    Reply = ok, {reply, Reply, State}.
 
-handle_cast(Msg, State) ->
-    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
-    {noreply, State}.
+handle_cast({register_iq_handler, Host, XMLNS, Module,
+	     Function, Opts},
+	    State) ->
+    ets:insert(?IQTABLE,
+	       {{Host, XMLNS}, Module, Function, Opts}),
+    {noreply, State};
+handle_cast({unregister_iq_handler, Host, XMLNS},
+	    State) ->
+    case ets:lookup(?IQTABLE, {Host, XMLNS}) of
+      [{_, Module, Function, Opts}] ->
+	  gen_iq_handler:stop_iq_handler(Module, Function, Opts);
+      _ -> ok
+    end,
+    ets:delete(?IQTABLE, {Host, XMLNS}),
+    {noreply, State};
+handle_cast(_Msg, State) -> {noreply, State}.
 
 handle_info({route, Packet}, State) ->
     route(Packet),
     {noreply, State};
 handle_info(Info, State) ->
-    ?WARNING_MSG("Unexpected info: ~p", [Info]),
+    ?WARNING_MSG("unexpected info: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
-    lists:foreach(fun host_down/1, ejabberd_option:hosts()),
+    lists:foreach(fun host_down/1, ?MYHOSTS),
     ejabberd_hooks:delete(host_up, ?MODULE, host_up, 10),
     ejabberd_hooks:delete(host_down, ?MODULE, host_down, 100),
     ok.
@@ -149,6 +196,22 @@ code_change(_OldVsn, State, _Extra) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
+-spec do_route(stanza()) -> any().
+do_route(Packet) ->
+    ?DEBUG("local route:~n~s", [xmpp:pp(Packet)]),
+    Type = xmpp:get_type(Packet),
+    To = xmpp:get_to(Packet),
+    if To#jid.luser /= <<"">> ->
+	    ejabberd_sm:route(Packet);
+       is_record(Packet, iq), To#jid.lresource == <<"">> ->
+	    process_iq(Packet);
+       Type == result; Type == error ->
+	    ok;
+       true ->
+	    ejabberd_hooks:run(local_send_to_resource_hook,
+			       To#jid.lserver, [Packet])
+    end.
+
 -spec update_table() -> ok.
 update_table() ->
     catch mnesia:delete_table(iq_response),

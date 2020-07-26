@@ -7,7 +7,7 @@
 %%% Created : 20 Jul 2011 by Evgeniy Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -36,14 +36,14 @@
 -export([start/2, stop/1, reload/3, process/2, open_session/2,
 	 close_session/1, find_session/1, clean_cache/1]).
 
--export([depends/2, mod_opt_type/1, mod_options/1, mod_doc/0]).
+-export([depends/2, mod_opt_type/1]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("xmpp.hrl").
 -include("ejabberd_http.hrl").
 -include("bosh.hrl").
--include("translate.hrl").
 
 -callback init() -> any().
 -callback open_session(binary(), pid()) -> ok | {error, any()}.
@@ -116,9 +116,10 @@ find_session(SID) ->
 	    end
     end.
 
-start(Host, _Opts) ->
-    Mod = gen_mod:ram_db_mod(Host, ?MODULE),
-    init_cache(Host, Mod),
+start(Host, Opts) ->
+    start_jiffy(Opts),
+    Mod = gen_mod:ram_db_mod(global, ?MODULE),
+    init_cache(Mod),
     Mod:init(),
     clean_cache(),
     TmpSup = gen_mod:get_module_proc(Host, ?MODULE),
@@ -132,15 +133,30 @@ stop(Host) ->
     supervisor:terminate_child(ejabberd_gen_mod_sup, TmpSup),
     supervisor:delete_child(ejabberd_gen_mod_sup, TmpSup).
 
-reload(Host, _NewOpts, _OldOpts) ->
+reload(_Host, NewOpts, _OldOpts) ->
+    start_jiffy(NewOpts),
     Mod = gen_mod:ram_db_mod(global, ?MODULE),
-    init_cache(Host, Mod),
+    init_cache(Mod),
     Mod:init(),
     ok.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+start_jiffy(Opts) ->
+    case gen_mod:get_opt(json, Opts, false) of
+        false ->
+            ok;
+        true ->
+            case catch ejabberd:start_app(jiffy) of
+                ok ->
+                    ok;
+                Err ->
+                    ?WARNING_MSG("Failed to start JSON codec (jiffy): ~p. "
+                                 "JSON support will be disabled", [Err])
+            end
+    end.
+
 get_type(Hdrs) ->
     try
         {_, S} = lists:keyfind('Content-Type', 1, Hdrs),
@@ -155,134 +171,54 @@ depends(_Host, _Opts) ->
     [].
 
 mod_opt_type(json) ->
-    econf:and_then(
-      econf:bool(),
-      fun(false) -> false;
-	 (true) ->
-	      ejabberd:start_app(jiffy),
-	      true
-      end);
+    fun (false) -> false;
+	(true) -> true
+    end;
 mod_opt_type(max_concat) ->
-    econf:pos_int(unlimited);
+    fun (unlimited) -> unlimited;
+	(N) when is_integer(N), N > 0 -> N
+    end;
 mod_opt_type(max_inactivity) ->
-    econf:timeout(second);
+    fun (I) when is_integer(I), I > 0 -> I end;
 mod_opt_type(max_pause) ->
-    econf:timeout(second);
+    fun (I) when is_integer(I), I > 0 -> I end;
 mod_opt_type(prebind) ->
-    econf:bool();
-mod_opt_type(queue_type) ->
-    econf:queue_type();
+    fun (B) when is_boolean(B) -> B end;
 mod_opt_type(ram_db_type) ->
-    econf:db_type(?MODULE);
-mod_opt_type(use_cache) ->
-    econf:bool();
-mod_opt_type(cache_size) ->
-    econf:pos_int(infinity);
-mod_opt_type(cache_missed) ->
-    econf:bool();
-mod_opt_type(cache_life_time) ->
-    econf:timeout(second, infinity).
-
--spec mod_options(binary()) -> [{json, boolean()} |
-				{atom(), term()}].
-mod_options(Host) ->
-    [{json, false},
-     {max_concat, unlimited},
-     {max_inactivity, timer:seconds(30)},
-     {max_pause, timer:seconds(120)},
-     {prebind, false},
-     {ram_db_type, ejabberd_config:default_ram_db(Host, ?MODULE)},
-     {queue_type, ejabberd_option:queue_type(Host)},
-     {use_cache, ejabberd_option:use_cache(Host)},
-     {cache_size, ejabberd_option:cache_size(Host)},
-     {cache_missed, ejabberd_option:cache_missed(Host)},
-     {cache_life_time, ejabberd_option:cache_life_time(Host)}].
-
-mod_doc() ->
-    #{desc =>
-          ?T("This module implements XMPP over BOSH as defined in "
-             "https://xmpp.org/extensions/xep-0124.html[XEP-0124] and "
-             "https://xmpp.org/extensions/xep-0206.html[XEP-0206]. BOSH "
-             "stands for Bidirectional-streams Over Synchronous HTTP. "
-             "It makes it possible to simulate long lived connections "
-             "required by XMPP over the HTTP protocol. In practice, "
-             "this module makes it possible to use XMPP in a browser without "
-             "Websocket support and more generally to have a way to use "
-             "XMPP while having to get through an HTTP proxy."),
-      opts =>
-          [{json,
-            #{value => "true | false",
-              desc => ?T("This option has no effect.")}},
-           {max_concat,
-            #{value => "pos_integer() | infinity",
-              desc =>
-                  ?T("This option limits the number of stanzas that the server "
-                     "will send in a single bosh request. "
-                     "The default value is 'unlimited'.")}},
-           {max_inactivity,
-            #{value => "timeout()",
-              desc =>
-                  ?T("The option defines the maximum inactivity period. "
-                     "The default value is '30' seconds.")}},
-           {max_pause,
-            #{value => "pos_integer()",
-              desc =>
-                  ?T("Indicate the maximum length of a temporary session pause "
-                     "(in seconds) that a client can request. "
-                     "The default value is '120'.")}},
-           {prebind,
-            #{value => "true | false",
-              desc =>
-                  ?T("If enabled, the client can create the session without "
-                     "going through authentication. Basically, it creates a "
-                     "new session with anonymous authentication. "
-                     "The default value is 'false'.")}},
-           {queue_type,
-            #{value => "ram | file",
-              desc =>
-                  ?T("Same as top-level 'queue_type' option, but applied to this module only.")}},
-           {ram_db_type,
-            #{value => "mnesia | sql | redis",
-              desc =>
-                  ?T("Same as 'default_ram_db' but applied to this module only.")}},
-           {use_cache,
-            #{value => "true | false",
-              desc =>
-                  ?T("Same as top-level 'use_cache' option, but applied to this module only.")}},
-           {cache_size,
-            #{value => "pos_integer() | infinity",
-              desc =>
-                  ?T("Same as top-level 'cache_size' option, but applied to this module only.")}},
-           {cache_missed,
-            #{value => "true | false",
-              desc =>
-                  ?T("Same as top-level 'cache_missed' option, but applied to this module only.")}},
-           {cache_life_time,
-            #{value => "timeout()",
-              desc =>
-                  ?T("Same as top-level 'cache_life_time' option, but applied to this module only.")}}]}.
+    fun(T) -> ejabberd_config:v_db(?MODULE, T) end;
+mod_opt_type(queue_type) ->
+    fun(ram) -> ram; (file) -> file end;
+mod_opt_type(O) when O == use_cache; O == cache_missed ->
+    fun(B) when is_boolean(B) -> B end;
+mod_opt_type(O) when O == cache_size; O == cache_life_time ->
+    fun(I) when is_integer(I), I>0 -> I;
+       (unlimited) -> infinity;
+       (infinity) -> infinity
+    end;
+mod_opt_type(_) ->
+    [json, max_concat, max_inactivity, max_pause, prebind, ram_db_type,
+     queue_type, use_cache, cache_size, cache_missed, cache_life_time].
 
 %%%----------------------------------------------------------------------
 %%% Cache stuff
 %%%----------------------------------------------------------------------
--spec init_cache(binary(), module()) -> ok.
-init_cache(Host, Mod) ->
-    case use_cache(Mod, Host) of
+-spec init_cache(module()) -> ok.
+init_cache(Mod) ->
+    case use_cache(Mod) of
 	true ->
-	    ets_cache:new(?BOSH_CACHE, cache_opts(Host));
+	    ets_cache:new(?BOSH_CACHE, cache_opts());
 	false ->
 	    ets_cache:delete(?BOSH_CACHE)
     end.
 
 -spec use_cache(module()) -> boolean().
 use_cache(Mod) ->
-    use_cache(Mod, global).
-
--spec use_cache(module(), global | binary()) -> boolean().
-use_cache(Mod, Host) ->
     case erlang:function_exported(Mod, use_cache, 0) of
 	true -> Mod:use_cache();
-	false -> mod_bosh_opt:use_cache(Host)
+	false ->
+	    gen_mod:get_module_opt(
+	      global, ?MODULE, use_cache,
+	      ejabberd_config:use_cache(global))
     end.
 
 -spec cache_nodes(module()) -> [node()].
@@ -301,14 +237,23 @@ delete_cache(Mod, SID) ->
 	    ok
     end.
 
--spec cache_opts(binary()) -> [proplists:property()].
-cache_opts(Host) ->
-    MaxSize = mod_bosh_opt:cache_size(Host),
-    CacheMissed = mod_bosh_opt:cache_missed(Host),
-    LifeTime = mod_bosh_opt:cache_life_time(Host),
+-spec cache_opts() -> [proplists:property()].
+cache_opts() ->
+    MaxSize = gen_mod:get_module_opt(
+		global, ?MODULE, cache_size,
+		ejabberd_config:cache_size(global)),
+    CacheMissed = gen_mod:get_module_opt(
+		    global, ?MODULE, cache_missed,
+		    ejabberd_config:cache_missed(global)),
+    LifeTime = case gen_mod:get_module_opt(
+		      global, ?MODULE, cache_life_time,
+		      ejabberd_config:cache_life_time(global)) of
+		   infinity -> infinity;
+		   I -> timer:seconds(I)
+	       end,
     [{max_size, MaxSize}, {cache_missed, CacheMissed}, {life_time, LifeTime}].
 
--spec clean_cache(node()) -> non_neg_integer().
+-spec clean_cache(node()) -> ok.
 clean_cache(Node) ->
     ets_cache:filter(
       ?BOSH_CACHE,

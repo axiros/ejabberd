@@ -1,11 +1,11 @@
 %%%-------------------------------------------------------------------
 %%% File    : ejabberd_sip.erl
 %%% Author  : Evgeny Khramtsov <ekhramtsov@process-one.net>
-%%% Purpose :
+%%% Purpose : 
 %%% Created : 30 Apr 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2013-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2013-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,29 +24,27 @@
 %%%-------------------------------------------------------------------
 
 -module(ejabberd_sip).
--behaviour(ejabberd_listener).
 
 -ifndef(SIP).
 -include("logger.hrl").
--export([accept/1, start/3, start_link/3, listen_options/0]).
-fail() ->
-    ?CRITICAL_MSG("Listening module ~ts is not available: "
-		  "ejabberd is not compiled with SIP support",
-		  [?MODULE]),
-    erlang:error(sip_not_compiled).
-accept(_) ->
-    fail().
-listen_options() ->
-    fail().
-start(_, _, _) ->
-    fail().
-start_link(_, _, _) ->
-    fail().
+-export([socket_type/0, start/2, listen_opt_type/1]).
+log_error() ->
+    ?CRITICAL_MSG("ejabberd is not compiled with SIP support", []).
+socket_type() ->
+    log_error(),
+    raw.
+listen_opt_type(_) ->
+    log_error(),
+    [].
+start(_, _) ->
+    log_error(),
+    {error, sip_not_compiled}.
 -else.
 %% API
--export([tcp_init/2, udp_init/2, udp_recv/5, start/3,
-	 start_link/3, accept/1]).
--export([listen_opt_type/1, listen_options/0]).
+-export([tcp_init/2, udp_init/2, udp_recv/5, start/2,
+	 socket_type/0, listen_opt_type/1]).
+
+-include("ejabberd.hrl").
 
 %%%===================================================================
 %%% API
@@ -62,34 +60,41 @@ udp_init(Socket, Opts) ->
 udp_recv(Sock, Addr, Port, Data, Opts) ->
     esip_socket:udp_recv(Sock, Addr, Port, Data, Opts).
 
-start(SockMod, Socket, Opts) ->
-    esip_socket:start({SockMod, Socket}, Opts).
+start(Opaque, Opts) ->
+    esip_socket:start(Opaque, Opts).
 
-start_link(gen_tcp, Sock, Opts) ->
-    esip_socket:start_link(Sock, Opts).
-
-accept(_) ->
-    ok.
+socket_type() ->
+    raw.
 
 set_certfile(Opts) ->
     case lists:keymember(certfile, 1, Opts) of
 	true ->
 	    Opts;
 	false ->
-	    case ejabberd_pkix:get_certfile(ejabberd_config:get_myname()) of
+	    case ejabberd_pkix:get_certfile(?MYNAME) of
 		{ok, CertFile} ->
 		    [{certfile, CertFile}|Opts];
 		error ->
-		    Opts
+		    case ejabberd_config:get_option({domain_certfile, ?MYNAME}) of
+			undefined ->
+			    Opts;
+			CertFile ->
+			    [{certfile, CertFile}|Opts]
+		    end
 	    end
     end.
 
 listen_opt_type(certfile) ->
-    econf:pem().
-
-listen_options() ->
-    [{tls, false},
-     {certfile, undefined}].
+    fun(S) ->
+	    %% We cannot deprecate the option for now:
+	    %% I think SIP clients are too stupid to set SNI
+	    ejabberd_pkix:add_certfile(S),
+	    iolist_to_binary(S)
+    end;
+listen_opt_type(tls) ->
+    fun(B) when is_boolean(B) -> B end;
+listen_opt_type(_) ->
+    [tls, certfile].
 
 %%%===================================================================
 %%% Internal functions

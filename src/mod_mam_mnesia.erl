@@ -4,7 +4,7 @@
 %%% Created : 15 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -28,8 +28,7 @@
 
 %% API
 -export([init/2, remove_user/2, remove_room/3, delete_old_messages/3,
-	 extended_fields/0, store/8, write_prefs/4, get_prefs/2, select/6, remove_from_archive/3,
-	 is_empty_for_user/2, is_empty_for_room/3]).
+	 extended_fields/0, store/8, write_prefs/4, get_prefs/2, select/6]).
 
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("xmpp.hrl").
@@ -49,20 +48,13 @@
 %%% API
 %%%===================================================================
 init(_Host, _Opts) ->
-    try
-	{atomic, _} = ejabberd_mnesia:create(
-			?MODULE, archive_msg,
+    ejabberd_mnesia:create(?MODULE, archive_msg,
 			[{disc_only_copies, [node()]},
 			 {type, bag},
 			 {attributes, record_info(fields, archive_msg)}]),
-	{atomic, _} = ejabberd_mnesia:create(
-			?MODULE, archive_prefs,
+    ejabberd_mnesia:create(?MODULE, archive_prefs,
 			[{disc_only_copies, [node()]},
-			 {attributes, record_info(fields, archive_prefs)}]),
-	ok
-    catch _:{badmatch, _} ->
-	    {error, db_failure}
-    end.
+			 {attributes, record_info(fields, archive_prefs)}]).
 
 remove_user(LUser, LServer) ->
     US = {LUser, LServer},
@@ -74,29 +66,6 @@ remove_user(LUser, LServer) ->
 
 remove_room(_LServer, LName, LHost) ->
     remove_user(LName, LHost).
-
-remove_from_archive(LUser, LServer, none) ->
-    US = {LUser, LServer},
-    case mnesia:transaction(fun () -> mnesia:delete({archive_msg, US}) end) of
-	{atomic, _} -> ok;
-	{aborted, Reason} -> {error, Reason}
-    end;
-remove_from_archive(LUser, LServer, WithJid) ->
-    US = {LUser, LServer},
-    Peer = jid:remove_resource(jid:split(WithJid)),
-    F = fun () ->
-	    Msgs = mnesia:select(
-		     archive_msg,
-		     ets:fun2ms(
-		       fun(#archive_msg{us = US1, bare_peer = Peer1} = Msg)
-			  when US1 == US, Peer1 == Peer -> Msg
-		       end)),
-	    lists:foreach(fun mnesia:delete_object/1, Msgs)
-	end,
-    case mnesia:transaction(F) of
-	{atomic, _} -> ok;
-	{aborted, Reason} -> {error, Reason}
-    end.
 
 delete_old_messages(global, TimeStamp, Type) ->
     mnesia:change_table_copy_type(archive_msg, node(), disc_copies),
@@ -127,7 +96,7 @@ delete_old_user_messages(User, TimeStamp, Type) ->
 	{atomic, ok} ->
 	    delete_old_user_messages(NextRecord, TimeStamp, Type);
 	{aborted, Err} ->
-	    ?ERROR_MSG("Cannot delete old MAM messages: ~ts", [Err]),
+	    ?ERROR_MSG("Cannot delete old MAM messages: ~s", [Err]),
 	    Err
     end.
 
@@ -138,7 +107,7 @@ store(Pkt, _, {LUser, LServer}, Type, Peer, Nick, _Dir, TS) ->
     case {mnesia:table_info(archive_msg, disc_only_copies),
 	  mnesia:table_info(archive_msg, memory)} of
 	{[_|_], TableSize} when TableSize > ?TABLE_SIZE_LIMIT ->
-	    ?ERROR_MSG("MAM archives too large, won't store message for ~ts@~ts",
+	    ?ERROR_MSG("MAM archives too large, won't store message for ~s@~s",
 		       [LUser, LServer]),
 	    {error, overflow};
 	_ ->
@@ -158,7 +127,7 @@ store(Pkt, _, {LUser, LServer}, Type, Peer, Nick, _Dir, TS) ->
 		{atomic, ok} ->
 		    ok;
 		{aborted, Err} ->
-		    ?ERROR_MSG("Cannot add message to MAM archive of ~ts@~ts: ~ts",
+		    ?ERROR_MSG("Cannot add message to MAM archive of ~s@~s: ~s",
 			       [LUser, LServer, Err]),
 		    Err
 	    end
@@ -203,12 +172,6 @@ select(_LServer, JidRequestor,
 		end, FilteredMsgs), IsComplete, Count},
     erlang:garbage_collect(),
     Result.
-
-is_empty_for_user(LUser, LServer) ->
-    mnesia:dirty_read(archive_msg, {LUser, LServer}) == [].
-
-is_empty_for_room(_LServer, LName, LHost) ->
-    is_empty_for_user(LName, LHost).
 
 %%%===================================================================
 %%% Internal functions

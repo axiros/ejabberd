@@ -27,7 +27,7 @@ case $(id -un) in
             EXEC_CMD="as_install_user"
         else
             EXEC_CMD="as_current_user"
-            echo "WARNING: It is not recommended to run ejabberd as root" >&2
+            echo "WARNING: This is not recommended to run ejabberd as root" >&2
         fi
         ;;
     *)
@@ -41,17 +41,19 @@ case $(id -un) in
 esac
 
 # parse command line parameters
-while [ $# -gt 0 ]; do
-    case $1 in
-        -n|--node) ERLANG_NODE_ARG=$2; shift 2;;
-        -s|--spool) SPOOL_DIR=$2; shift 2;;
-        -l|--logs) LOGS_DIR=$2; shift 2;;
-        -f|--config) EJABBERD_CONFIG_PATH=$2; shift 2;;
-        -c|--ctl-config) EJABBERDCTL_CONFIG_PATH=$2; shift 2;;
-        -d|--config-dir) ETC_DIR=$2; shift 2;;
-        -t|--no-timeout) NO_TIMEOUT="--no-timeout"; shift;;
+for arg; do
+    case $arg in
+        -n|--node) ERLANG_NODE_ARG=$2; shift;;
+        -s|--spool) SPOOL_DIR=$2; shift;;
+        -l|--logs) LOGS_DIR=$2; shift;;
+        -f|--config) EJABBERD_CONFIG_PATH=$2; shift;;
+        -c|--ctl-config) EJABBERDCTL_CONFIG_PATH=$2; shift;;
+        -d|--config-dir) ETC_DIR=$2; shift;;
+        -t|--no-timeout) NO_TIMEOUT="--no-timeout";;
+        --) :;;
         *) break;;
     esac
+    shift
 done
 
 # define ejabberd variables if not already defined from the command line
@@ -198,7 +200,7 @@ uid()
     uuid=$(uuidgen 2>/dev/null)
     [ -z "$uuid" ] && [ -f /proc/sys/kernel/random/uuid ] && uuid=$(cat /proc/sys/kernel/random/uuid)
     [ -z "$uuid" ] && uuid=$(printf "%X" "${RANDOM:-$$}$(date +%M%S)")
-    uuid=$(printf '%s' $uuid | sed 's/^\(...\).*$/\1/')
+    uuid=${uuid%%-*}
     [ $# -eq 0 ] && echo "${uuid}-${ERLANG_NODE}"
     [ $# -eq 1 ] && echo "${uuid}-${1}-${ERLANG_NODE}"
     [ $# -eq 2 ] && echo "${uuid}-${1}@${2}"
@@ -261,7 +263,7 @@ cd "$SPOOL_DIR" || {
 case $1 in
     start)
         check_start
-        exec_erl "$ERLANG_NODE" $EJABBERD_OPTS -detached
+        exec_erl "$ERLANG_NODE" $EJABBERD_OPTS -noinput -detached
         ;;
     foreground)
         check_start

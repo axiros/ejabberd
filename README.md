@@ -1,4 +1,4 @@
-ejabberd Community Edition
+ejabberd Community Edition 
 ==========================
 
 [![Build Status](https://travis-ci.org/processone/ejabberd.svg?branch=master)](https://travis-ci.org/processone/ejabberd) [![Hex version](https://img.shields.io/hexpm/v/ejabberd.svg "Hex version")](https://hex.pm/packages/ejabberd)
@@ -14,45 +14,43 @@ solutions very cost effectively.
 Key Features
 ------------
 
-- **Cross-platform**
+- **Cross-platform**  
   ejabberd runs under Microsoft Windows and Unix-derived systems such as
   Linux, FreeBSD and NetBSD.
 
-- **Distributed**
+- **Distributed**  
   You can run ejabberd on a cluster of machines and all of them will serve the
   same XMPP domain(s). When you need more capacity you can simply add a new
   cheap node to your cluster. Accordingly, you do not need to buy an expensive
   high-end machine to support tens of thousands concurrent users.
 
-- **Fault-tolerant**
+- **Fault-tolerant**  
   You can deploy an ejabberd cluster so that all the information required for
   a properly working service will be replicated permanently on all nodes. This
   means that if one of the nodes crashes, the others will continue working
   without disruption. In addition, nodes also can be added or replaced ‘on
   the fly’.
 
-- **Administrator-friendly**
+- **Administrator-friendly**  
   ejabberd is built on top of the Open Source Erlang. As a result you do not
   need to install an external database, an external web server, amongst others
   because everything is already included, and ready to run out of the box.
   Other administrator benefits include:
   - Comprehensive documentation.
-  - Straightforward installers for Linux.
-  - Docker packaging to help with deploy / development on Linux, Windows or MacOS.
-  - Deb and RPM packaging to support most Linux distributions.
+  - Straightforward installers for Linux and Mac OS X.
   - Web administration.
   - Shared roster groups.
   - Command line administration tool.
   - Can integrate with existing authentication mechanisms.
   - Capability to send announce messages.
 
-- **Internationalized**
+- **Internationalized**  
   ejabberd leads in internationalization. Hence it is very well suited in a
   globalized world. Related features are:
   - Translated to 25 languages.
   - Support for IDNA.
 
-- **Open Standards**
+- **Open Standards**  
   ejabberd is the first Open Source Jabber server claiming to fully comply to
   the XMPP standard.
   - Fully XMPP-compliant.
@@ -95,6 +93,7 @@ Moreover, ejabberd comes with a wide range of other state-of-the-art features:
   - Users Directory based on users vCards.
   - Publish-Subscribe component with support for Personal Eventing.
   - Support for web clients: HTTP Polling and HTTP Binding (BOSH).
+  - IRC transport.
   - Component support: interface with networks such as AIM, ICQ and MSN.
 
 
@@ -107,14 +106,15 @@ To compile ejabberd you need:
 
  - GNU Make.
  - GCC.
- - Libexpat ≥ 1.95.
- - Libyaml ≥ 0.1.4.
- - Erlang/OTP ≥ 19.3.
- - OpenSSL ≥ 1.0.0.
- - Zlib ≥ 1.2.3, for Stream Compression support (XEP-0138). Optional.
+ - Libexpat 1.95 or higher.
+ - Libyaml 0.1.4 or higher.
+ - Erlang/OTP 17.5 or higher.
+ - OpenSSL 1.0.0 or higher, for STARTTLS, SASL and SSL encryption.
+ - Zlib 1.2.3 or higher, for Stream Compression support (XEP-0138). Optional.
  - PAM library. Optional. For Pluggable Authentication Modules (PAM).
- - ImageMagick's Convert program and Ghostscript fonts. Optional. For CAPTCHA
-   challenges.
+ - GNU Iconv 1.8 or higher, for the IRC Transport (mod_irc). Optional. Not
+   needed on systems with GNU Libc.
+ - ImageMagick's Convert program. Optional. For CAPTCHA challenges.
 
 If your system splits packages in libraries and development headers, you must
 install the development packages also.
@@ -172,6 +172,6 @@ type a command like:
 Links
 -----
 
-- Documentation: https://docs.ejabberd.im
+- Documentation: http://docs.ejabberd.im
 - Community site: https://www.ejabberd.im
 - ejabberd commercial offering and support: https://www.process-one.net/en/ejabberd

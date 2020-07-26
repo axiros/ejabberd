@@ -1,5 +1,5 @@
 --
--- ejabberd, Copyright (C) 2002-2020   ProcessOne
+-- ejabberd, Copyright (C) 2002-2017   ProcessOne
 --
 -- This program is free software; you can redistribute it and/or
 -- modify it under the terms of the GNU General Public License as
@@ -61,14 +61,15 @@
 -- ALTER TABLE spool ALTER COLUMN server_host DROP DEFAULT;
 
 -- ALTER TABLE archive ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
+-- DROP INDEX i_username;
 -- DROP INDEX i_username_timestamp;
--- DROP INDEX i_username_peer;
--- DROP INDEX i_username_bare_peer;
 -- DROP INDEX i_timestamp;
+-- DROP INDEX i_peer;
+-- DROP INDEX i_bare_peer;
 -- CREATE INDEX i_archive_sh_username_timestamp ON archive USING btree (server_host, username, timestamp);
--- CREATE INDEX i_archive_sh_username_peer ON archive USING btree (server_host, username, peer);
--- CREATE INDEX i_archive_sh_username_bare_peer ON archive USING btree (server_host, username, bare_peer);
 -- CREATE INDEX i_archive_sh_timestamp ON archive USING btree (server_host, timestamp);
+-- CREATE INDEX i_archive_sh_peer ON archive USING btree (server_host, peer);
+-- CREATE INDEX i_archive_sh_bare_peer ON archive USING btree (server_host, bare_peer);
 -- ALTER TABLE archive ALTER COLUMN server_host DROP DEFAULT;
 
 -- ALTER TABLE archive_prefs ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
@@ -144,6 +145,9 @@
 -- ALTER TABLE muc_online_users ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
 -- ALTER TABLE muc_online_users ALTER COLUMN server_host DROP DEFAULT;
 
+-- ALTER TABLE irc_custom ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
+-- ALTER TABLE irc_custom ALTER COLUMN server_host DROP DEFAULT;
+
 -- ALTER TABLE motd ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
 -- ALTER TABLE motd DROP CONSTRAINT motd_pkey;
 -- ALTER TABLE motd ADD PRIMARY KEY (server_host, username);
@@ -155,6 +159,13 @@
 -- ALTER TABLE sm ADD PRIMARY KEY (usec, pid);
 -- CREATE INDEX i_sm_sh_username ON sm USING btree (server_host, username);
 -- ALTER TABLE sm ALTER COLUMN server_host DROP DEFAULT;
+
+-- ALTER TABLE carboncopy ADD COLUMN server_host text NOT NULL DEFAULT '<HOST>';
+-- DROP INDEX i_carboncopy_ur;
+-- DROP INDEX i_carboncopy_user;
+-- ALTER TABLE carboncopy ADD PRIMARY KEY (server_host, username, resource);
+-- CREATE INDEX i_carboncopy_sh_user ON carboncopy USING btree (server_host, username);
+-- ALTER TABLE carboncopy ALTER COLUMN server_host DROP DEFAULT;
 
 
 CREATE TABLE users (
@@ -254,9 +265,9 @@ CREATE TABLE archive (
 );
 
 CREATE INDEX i_archive_sh_username_timestamp ON archive USING btree (server_host, username, timestamp);
-CREATE INDEX i_archive_sh_username_peer ON archive USING btree (server_host, username, peer);
-CREATE INDEX i_archive_sh_username_bare_peer ON archive USING btree (server_host, username, bare_peer);
 CREATE INDEX i_archive_sh_timestamp ON archive USING btree (server_host, timestamp);
+CREATE INDEX i_archive_sh_peer ON archive USING btree (server_host, peer);
+CREATE INDEX i_archive_sh_bare_peer ON archive USING btree (server_host, bare_peer);
 
 CREATE TABLE archive_prefs (
     username text NOT NULL,
@@ -282,7 +293,7 @@ CREATE TABLE vcard_search (
     server_host text NOT NULL,
     fn text NOT NULL,
     lfn text NOT NULL,
-    "family" text NOT NULL,
+    family text NOT NULL,
     lfamily text NOT NULL,
     given text NOT NULL,
     lgiven text NOT NULL,
@@ -418,8 +429,8 @@ CREATE TABLE pubsub_item (
   nodeid bigint REFERENCES pubsub_node(nodeid) ON DELETE CASCADE,
   itemid text NOT NULL,
   publisher text NOT NULL,
-  creation varchar(32) NOT NULL,
-  modification varchar(32) NOT NULL,
+  creation text NOT NULL,
+  modification text NOT NULL,
   payload text NOT NULL DEFAULT ''
 );
 CREATE INDEX i_pubsub_item_itemid ON pubsub_item USING btree (itemid);
@@ -488,6 +499,16 @@ CREATE TABLE muc_room_subscribers (
 CREATE INDEX i_muc_room_subscribers_host_jid ON muc_room_subscribers USING btree (host, jid);
 CREATE UNIQUE INDEX i_muc_room_subscribers_host_room_jid ON muc_room_subscribers USING btree (host, room, jid);
 
+CREATE TABLE irc_custom (
+    jid text NOT NULL,
+    host text NOT NULL,
+    server_host text NOT NULL,
+    data text NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX i_irc_custom_jid_host ON irc_custom USING btree (jid, host);
+
 CREATE TABLE motd (
     username text NOT NULL,
     server_host text NOT NULL,
@@ -529,13 +550,6 @@ CREATE TABLE oauth_token (
 
 CREATE UNIQUE INDEX i_oauth_token_token ON oauth_token USING btree (token);
 
-CREATE TABLE oauth_client (
-    client_id text PRIMARY KEY,
-    client_name text NOT NULL,
-    grant_type text NOT NULL,
-    options text NOT NULL
-);
-
 CREATE TABLE route (
     domain text NOT NULL,
     server_host text NOT NULL,
@@ -554,6 +568,17 @@ CREATE TABLE bosh (
 );
 
 CREATE UNIQUE INDEX i_bosh_sid ON bosh USING btree (sid);
+
+CREATE TABLE carboncopy (
+    username text NOT NULL,
+    server_host text NOT NULL,
+    resource text NOT NULL,
+    namespace text NOT NULL,
+    node text NOT NULL,
+    PRIMARY KEY (server_host, username, resource)
+);
+
+CREATE INDEX i_carboncopy_sh_user ON carboncopy USING btree (server_host, username);
 
 CREATE TABLE proxy65 (
     sid text NOT NULL,
@@ -578,74 +603,3 @@ CREATE TABLE push_session (
 );
 
 CREATE UNIQUE INDEX i_push_session_susn ON push_session USING btree (server_host, username, service, node);
-
-CREATE TABLE mix_channel (
-    channel text NOT NULL,
-    service text NOT NULL,
-    username text NOT NULL,
-    domain text NOT NULL,
-    jid text NOT NULL,
-    hidden boolean NOT NULL,
-    hmac_key text NOT NULL,
-    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX i_mix_channel ON mix_channel (channel, service);
-CREATE INDEX i_mix_channel_serv ON mix_channel (service);
-
-CREATE TABLE mix_participant (
-    channel text NOT NULL,
-    service text NOT NULL,
-    username text NOT NULL,
-    domain text NOT NULL,
-    jid text NOT NULL,
-    id text NOT NULL,
-    nick text NOT NULL,
-    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX i_mix_participant ON mix_participant (channel, service, username, domain);
-CREATE INDEX i_mix_participant_chan_serv ON mix_participant (channel, service);
-
-CREATE TABLE mix_subscription (
-    channel text NOT NULL,
-    service text NOT NULL,
-    username text NOT NULL,
-    domain text NOT NULL,
-    node text NOT NULL,
-    jid text NOT NULL
-);
-
-CREATE UNIQUE INDEX i_mix_subscription ON mix_subscription (channel, service, username, domain, node);
-CREATE INDEX i_mix_subscription_chan_serv_ud ON mix_subscription (channel, service, username, domain);
-CREATE INDEX i_mix_subscription_chan_serv_node ON mix_subscription (channel, service, node);
-CREATE INDEX i_mix_subscription_chan_serv ON mix_subscription (channel, service);
-
-CREATE TABLE mix_pam (
-    username text NOT NULL,
-    server_host text NOT NULL,
-    channel text NOT NULL,
-    service text NOT NULL,
-    id text NOT NULL,
-    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX i_mix_pam ON mix_pam (username, server_host, channel, service);
-CREATE INDEX i_mix_pam_us ON mix_pam (username, server_host);
-
-CREATE TABLE mqtt_pub (
-    username text NOT NULL,
-    server_host text NOT NULL,
-    resource text NOT NULL,
-    topic text NOT NULL,
-    qos smallint NOT NULL,
-    payload bytea NOT NULL,
-    payload_format smallint NOT NULL,
-    content_type text NOT NULL,
-    response_topic text NOT NULL,
-    correlation_data bytea NOT NULL,
-    user_properties bytea NOT NULL,
-    expiry bigint NOT NULL
-);
-
-CREATE UNIQUE INDEX i_mqtt_topic_server ON mqtt_pub (topic, server_host);

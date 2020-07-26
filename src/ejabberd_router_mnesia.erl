@@ -2,7 +2,7 @@
 %%% Created : 11 Jan 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -30,6 +30,7 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2,
 	 terminate/2, code_change/3, start_link/0]).
 
+-include("ejabberd.hrl").
 -include("ejabberd_router.hrl").
 -include("logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
@@ -100,12 +101,8 @@ register_route(Domain, ServerHost, _LocalHint, N, Pid) ->
 
 unregister_route(Domain, undefined, Pid) ->
     F = fun () ->
-		case mnesia:select(
-		       route,
-		       ets:fun2ms(
-			 fun(#route{domain = D, pid = P} = R)
-			       when D == Domain, P == Pid -> R
-			 end)) of
+		case mnesia:match_object(
+		       #route{domain = Domain, pid = Pid, _ = '_'}) of
 		    [R] -> mnesia:delete_object(R);
 		    _ -> ok
 		end
@@ -113,12 +110,8 @@ unregister_route(Domain, undefined, Pid) ->
     transaction(F);
 unregister_route(Domain, _, Pid) ->
     F = fun () ->
-		case mnesia:select(
-		       route,
-		       ets:fun2ms(
-			 fun(#route{domain = D, pid = P} = R)
-			       when D == Domain, P == Pid -> R
-			 end)) of
+		case mnesia:match_object(
+		       #route{domain = Domain, pid = Pid, _ = '_'}) of
 		    [R] ->
 			I = R#route.local_hint,
 			ServerHost = R#route.server_host,
@@ -155,18 +148,15 @@ init([]) ->
     mnesia:subscribe({table, route, simple}),
     lists:foreach(
       fun (Pid) -> erlang:monitor(process, Pid) end,
-      mnesia:dirty_select(
-	route,
-	ets:fun2ms(
-	  fun(#route{pid = Pid}) -> Pid end))),
+      mnesia:dirty_select(route,
+			  [{#route{pid = '$1', _ = '_'}, [], ['$1']}])),
     {ok, #state{}}.
 
-handle_call(Request, From, State) ->
-    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
-    {noreply, State}.
+handle_call(_Request, _From, State) ->
+    Reply = ok,
+    {reply, Reply, State}.
 
-handle_cast(Msg, State) ->
-    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({mnesia_table_event,
@@ -177,12 +167,8 @@ handle_info({mnesia_table_event, _}, State) ->
     {noreply, State};
 handle_info({'DOWN', _Ref, _Type, Pid, _Info}, State) ->
     F = fun () ->
-		Es = mnesia:select(
-		       route,
-		       ets:fun2ms(
-			 fun(#route{pid = P} = E)
-			       when P == Pid -> E
-			 end)),
+		Es = mnesia:select(route,
+				   [{#route{pid = Pid, _ = '_'}, [], ['$_']}]),
 		lists:foreach(
 		  fun(E) ->
 			  if is_integer(E#route.local_hint) ->
@@ -202,7 +188,7 @@ handle_info({'DOWN', _Ref, _Type, Pid, _Info}, State) ->
     transaction(F),
     {noreply, State};
 handle_info(Info, State) ->
-    ?ERROR_MSG("Unexpected info: ~p", [Info]),
+    ?ERROR_MSG("unexpected info: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->

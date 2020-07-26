@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : ejabberd_auth_mnesia.erl
 %%% Author  : Alexey Shchepin <alexey@process-one.net>
-%%% Purpose : Authentication via mnesia
+%%% Purpose : Authentification via mnesia
 %%% Created : 12 Dec 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,6 +25,8 @@
 
 -module(ejabberd_auth_mnesia).
 
+-compile([{parse_transform, ejabberd_sql_pt}]).
+
 -author('alexey@process-one.net').
 
 -behaviour(ejabberd_auth).
@@ -36,8 +38,8 @@
 	 plain_password_required/1, use_cache/1]).
 -export([need_transform/1, transform/1]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
--include("scram.hrl").
 -include("ejabberd_auth.hrl").
 
 -record(reg_users_counter, {vhost = <<"">> :: binary(),
@@ -75,7 +77,9 @@ update_reg_users_counter_table(Server) ->
 use_cache(Host) ->
     case mnesia:table_info(passwd, storage_type) of
 	disc_only_copies ->
-	    ejabberd_option:auth_use_cache(Host);
+	    ejabberd_config:get_option(
+	      {auth_use_cache, Host},
+	      ejabberd_config:use_cache(Host));
 	_ ->
 	    false
     end.
@@ -93,10 +97,10 @@ set_password(User, Server, Password) ->
 	end,
     case mnesia:transaction(F) of
 	{atomic, ok} ->
-	    {cache, {ok, Password}};
+	    ok;
 	{aborted, Reason} ->
 	    ?ERROR_MSG("Mnesia transaction failed: ~p", [Reason]),
-	    {nocache, {error, db_failure}}
+	    {error, db_failure}
     end.
 
 try_register(User, Server, Password) ->
@@ -106,17 +110,17 @@ try_register(User, Server, Password) ->
 		    [] ->
 			mnesia:write(#passwd{us = US, password = Password}),
 			mnesia:dirty_update_counter(reg_users_counter, Server, 1),
-			{ok, Password};
+			ok;
 		    [_] ->
 			{error, exists}
 		end
 	end,
     case mnesia:transaction(F) of
 	{atomic, Res} ->
-	    {cache, Res};
+	    Res;
 	{aborted, Reason} ->
 	    ?ERROR_MSG("Mnesia transaction failed: ~p", [Reason]),
-	    {nocache, {error, db_failure}}
+	    {error, db_failure}
     end.
 
 get_users(Server, []) ->
@@ -181,9 +185,9 @@ count_users(Server, _) ->
 get_password(User, Server) ->
     case mnesia:dirty_read(passwd, {User, Server}) of
 	[#passwd{password = Password}] ->
-	    {cache, {ok, Password}};
+	    {ok, Password};
 	_ ->
-	    {cache, error}
+	    error
     end.
 
 remove_user(User, Server) ->
@@ -203,7 +207,7 @@ remove_user(User, Server) ->
 
 need_transform(#reg_users_counter{}) ->
     false;
-need_transform({passwd, {U, S}, Pass}) ->
+need_transform(#passwd{us = {U, S}, password = Pass}) ->
     if is_binary(Pass) ->
 	    case store_type(S) of
 		scram ->
@@ -230,7 +234,7 @@ need_transform({passwd, {U, S}, Pass}) ->
 	    true
     end.
 
-transform({passwd, {U, S}, Pass})
+transform(#passwd{us = {U, S}, password = Pass} = R)
   when is_list(U) orelse is_list(S) orelse is_list(Pass) ->
     NewUS = {iolist_to_binary(U), iolist_to_binary(S)},
     NewPass = case Pass of
@@ -244,14 +248,14 @@ transform({passwd, {U, S}, Pass})
 		  _ ->
 		      iolist_to_binary(Pass)
 	      end,
-    transform(#passwd{us = NewUS, password = NewPass});
+    transform(R#passwd{us = NewUS, password = NewPass});
 transform(#passwd{us = {U, S}, password = Password} = P)
   when is_binary(Password) ->
     case store_type(S) of
 	scram ->
 	    case jid:resourceprep(Password) of
 		error ->
-		    ?ERROR_MSG("SASLprep failed for password of user ~ts@~ts",
+		    ?ERROR_MSG("SASLprep failed for password of user ~s@~s",
 			       [U, S]),
 		    P;
 		_ ->

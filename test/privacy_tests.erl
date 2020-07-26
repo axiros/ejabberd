@@ -3,7 +3,7 @@
 %%% Created : 18 Oct 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -202,8 +202,7 @@ malformed_iq_query(Config) ->
     disconnect(Config).
 
 malformed_get(Config) ->
-    JID = jid:make(p1_rand:get_string()),
-    Item = #block_item{jid = JID},
+    JID = jid:make(randoms:get_string()),
     lists:foreach(
       fun(SubEl) ->
 	      #iq{type = error} =
@@ -212,7 +211,7 @@ malformed_get(Config) ->
 	    #privacy_query{default = none},
 	    #privacy_query{lists = [#privacy_list{name = <<"1">>},
 				    #privacy_list{name = <<"2">>}]},
-	    #block{items = [Item]}, #unblock{items = [Item]},
+	    #block{items = [JID]}, #unblock{items = [JID]},
 	    #block{}, #unblock{}]),
     disconnect(Config).
 
@@ -226,9 +225,7 @@ malformed_set(Config) ->
 				    #privacy_list{name = <<"2">>}]},
 	    #block{},
 	    #block_list{},
-	    #block_list{
-	       items = [#block_item{
-			   jid = jid:make(p1_rand:get_string())}]}]),
+	    #block_list{items = [jid:make(randoms:get_string())]}]),
     disconnect(Config).
 
 malformed_type_value(Config) ->
@@ -245,8 +242,8 @@ malformed_type_value(Config) ->
     disconnect(Config).
 
 set_get_block(Config) ->
-    J1 = jid:make(p1_rand:get_string(), p1_rand:get_string()),
-    J2 = jid:make(p1_rand:get_string(), p1_rand:get_string()),
+    J1 = jid:make(randoms:get_string(), randoms:get_string()),
+    J2 = jid:make(randoms:get_string(), randoms:get_string()),
     {ok, ListName} = set_block(Config, [J1, J2]),
     JIDs = get_block(Config),
     JIDs = lists:sort([J1, J2]),
@@ -304,7 +301,7 @@ deny_server_full_jid_slave(Config) ->
     deny_slave(Config).
 
 deny_group_master(Config) ->
-    Group = p1_rand:get_string(),
+    Group = randoms:get_string(),
     deny_master(Config, {group, Group}).
 
 deny_group_slave(Config) ->
@@ -353,7 +350,7 @@ deny_master(Config, {Type, Value}) ->
     lists:foreach(
       fun(Opts) ->
 	      ct:pal("Set list for ~s, ~s, ~w", [Type, Value, Opts]),
-	      ListName = p1_rand:get_string(),
+	      ListName = randoms:get_string(),
 	      Item = #privacy_item{order = 0,
 				   action = deny,
 				   iq = proplists:get_bool(iq, Opts),
@@ -612,25 +609,24 @@ set_default(Config, Name) ->
 
 get_block(Config) ->
     case send_recv(Config, #iq{type = get, sub_els = [#block_list{}]}) of
-	#iq{type = result, sub_els = [#block_list{items = Items}]} ->
-	    lists:sort([JID || #block_item{jid = JID} <- Items]);
+	#iq{type = result, sub_els = [#block_list{items = JIDs}]} ->
+	    lists:sort(JIDs);
 	#iq{type = error} = Err ->
 	    xmpp:get_error(Err)
     end.
 
 set_block(Config, JIDs) ->
-    Items = [#block_item{jid = JID} || JID <- JIDs],
     case send_recv(Config, #iq{type = set,
-			       sub_els = [#block{items = Items}]}) of
+			       sub_els = [#block{items = JIDs}]}) of
 	#iq{type = result, sub_els = []} ->
-	    {#iq{id = I1, sub_els = [#block{items = Items1}]},
+	    {#iq{id = I1, sub_els = [#block{items = Items}]},
 	     #iq{id = I2, sub_els = [#privacy_query{lists = Lists}]}} =
 		?recv2(#iq{type = set, sub_els = [#block{}]},
 		       #iq{type = set, sub_els = [#privacy_query{}]}),
 	    send(Config, #iq{type = result, id = I1}),
 	    send(Config, #iq{type = result, id = I2}),
 	    ct:comment("Checking if all JIDs present in the push"),
-	    true = lists:sort(Items) == lists:sort(Items1),
+	    true = lists:sort(JIDs) == lists:sort(Items),
 	    ct:comment("Getting name of the corresponding privacy list"),
 	    [#privacy_list{name = Name}] = Lists,
 	    {ok, Name};
@@ -640,18 +636,17 @@ set_block(Config, JIDs) ->
 
 set_unblock(Config, JIDs) ->
     ct:comment("Unblocking ~p", [JIDs]),
-    Items = [#block_item{jid = JID} || JID <- JIDs],
     case send_recv(Config, #iq{type = set,
-			       sub_els = [#unblock{items = Items}]}) of
+			       sub_els = [#unblock{items = JIDs}]}) of
 	#iq{type = result, sub_els = []} ->
-	    {#iq{id = I1, sub_els = [#unblock{items = Items1}]},
+	    {#iq{id = I1, sub_els = [#unblock{items = Items}]},
 	     #iq{id = I2, sub_els = [#privacy_query{lists = Lists}]}} =
 		?recv2(#iq{type = set, sub_els = [#unblock{}]},
 		       #iq{type = set, sub_els = [#privacy_query{}]}),
 	    send(Config, #iq{type = result, id = I1}),
 	    send(Config, #iq{type = result, id = I2}),
 	    ct:comment("Checking if all JIDs present in the push"),
-	    true = lists:sort(Items) == lists:sort(Items1),
+	    true = lists:sort(JIDs) == lists:sort(Items),
 	    ct:comment("Getting name of the corresponding privacy list"),
 	    [#privacy_list{name = Name}] = Lists,
 	    {ok, Name};
@@ -710,7 +705,7 @@ check_presence_blocked(Config, Reason) ->
 	      #stanza_error{reason = Reason} = xmpp:get_error(Err)
       end, [available, unavailable]).
 
-recv_roster_pushes(_Config, 0) ->
+recv_roster_pushes(Config, 0) ->
     ok;
 recv_roster_pushes(Config, Count) ->
     receive
@@ -719,6 +714,7 @@ recv_roster_pushes(Config, Count) ->
     end.
 
 recv_err_and_roster_pushes(Config, Count) ->
+    PeerJID = ?config(master, Config),
     recv_roster_pushes(Config, Count),
     recv_presence(Config).
 

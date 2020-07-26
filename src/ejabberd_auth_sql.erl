@@ -1,11 +1,11 @@
 %%%----------------------------------------------------------------------
 %%% File    : ejabberd_auth_sql.erl
 %%% Author  : Alexey Shchepin <alexey@process-one.net>
-%%% Purpose : Authentication via ODBC
+%%% Purpose : Authentification via ODBC
 %%% Created : 12 Dec 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,17 +25,19 @@
 
 -module(ejabberd_auth_sql).
 
+-compile([{parse_transform, ejabberd_sql_pt}]).
 
 -author('alexey@process-one.net').
 
 -behaviour(ejabberd_auth).
+-behaviour(ejabberd_config).
 
 -export([start/1, stop/1, set_password/3, try_register/3,
 	 get_users/2, count_users/2, get_password/2,
 	 remove_user/2, store_type/1, plain_password_required/1,
-	 export/1, which_users_exists/2]).
+	 convert_to_scram/1, opt_type/1, export/1]).
 
--include("scram.hrl").
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include("ejabberd_sql_pt.hrl").
 -include("ejabberd_auth.hrl").
@@ -68,9 +70,9 @@ set_password(User, Server, Password) ->
 	end,
     case ejabberd_sql:sql_transaction(Server, F) of
 	{atomic, _} ->
-	    {cache, {ok, Password}};
+	    ok;
 	{aborted, _} ->
-	    {nocache, {error, db_failure}}
+	    {error, db_failure}
     end.
 
 try_register(User, Server, Password) ->
@@ -83,8 +85,8 @@ try_register(User, Server, Password) ->
 		  add_user(Server, User, Password)
 	  end,
     case Res of
-	{updated, 1} -> {cache, {ok, Password}};
-	_ -> {nocache, {error, exists}}
+	{updated, 1} -> ok;
+	_ -> {error, exists}
     end.
 
 get_users(Server, Opts) ->
@@ -104,16 +106,16 @@ count_users(Server, Opts) ->
 get_password(User, Server) ->
     case get_password_scram(Server, User) of
 	{selected, [{Password, <<>>, <<>>, 0}]} ->
-	    {cache, {ok, Password}};
+	    {ok, Password};
 	{selected, [{StoredKey, ServerKey, Salt, IterationCount}]} ->
-	    {cache, {ok, #scram{storedkey = StoredKey,
-				serverkey = ServerKey,
-				salt = Salt,
-				iterationcount = IterationCount}}};
+	    {ok, #scram{storedkey = StoredKey,
+			serverkey = ServerKey,
+			salt = Salt,
+			iterationcount = IterationCount}};
 	{selected, []} ->
-	    {cache, error};
+	    error;
 	_ ->
-	    {nocache, error}
+	    error
     end.
 
 remove_user(User, Server) ->
@@ -205,12 +207,12 @@ list_users(LServer,
 	   [{prefix, Prefix}, {limit, Limit}, {offset, Offset}])
     when is_binary(Prefix) and is_integer(Limit) and
 	   is_integer(Offset) ->
-    SPrefix = ejabberd_sql:escape_like_arg(Prefix),
+    SPrefix = ejabberd_sql:escape_like_arg_circumflex(Prefix),
     SPrefix2 = <<SPrefix/binary, $%>>,
     ejabberd_sql:sql_query(
       LServer,
       ?SQL("select @(username)s from users "
-           "where username like %(SPrefix2)s %ESCAPE and %(LServer)H "
+           "where username like %(SPrefix2)s escape '^' and %(LServer)H "
            "order by username "
            "limit %(Limit)d offset %(Offset)d")).
 
@@ -219,7 +221,8 @@ users_number(LServer) ->
       LServer,
       fun(pgsql, _) ->
               case
-                  ejabberd_option:pgsql_users_number_estimate(LServer) of
+                  ejabberd_config:get_option(
+                    {pgsql_users_number_estimate, LServer}, false) of
                   true ->
                       ejabberd_sql:sql_query_t(
                         ?SQL("select @(reltuples :: bigint)d from pg_class"
@@ -235,37 +238,59 @@ users_number(LServer) ->
 
 users_number(LServer, [{prefix, Prefix}])
     when is_binary(Prefix) ->
-    SPrefix = ejabberd_sql:escape_like_arg(Prefix),
+    SPrefix = ejabberd_sql:escape_like_arg_circumflex(Prefix),
     SPrefix2 = <<SPrefix/binary, $%>>,
     ejabberd_sql:sql_query(
       LServer,
       ?SQL("select @(count(*))d from users "
-           "where username like %(SPrefix2)s %ESCAPE and %(LServer)H"));
+           "where username like %(SPrefix2)s escape '^' and %(LServer)H"));
 users_number(LServer, []) ->
     users_number(LServer).
 
-which_users_exists(LServer, LUsers) when length(LUsers) =< 100 ->
-    try ejabberd_sql:sql_query(
-        LServer,
-        ?SQL("select @(username)s from users where username in %(LUsers)ls")) of
-        {selected, Matching} ->
-            [U || {U} <- Matching];
-        {error, _} = E ->
-            E
-    catch _:B ->
-        {error, B}
-    end;
-which_users_exists(LServer, LUsers) ->
-    {First, Rest} = lists:split(100, LUsers),
-    case which_users_exists(LServer, First) of
-        {error, _} = E ->
-            E;
-        V ->
-            case which_users_exists(LServer, Rest) of
-                {error, _} = E2 ->
-                    E2;
-                V2 ->
-                    V ++ V2
+convert_to_scram(Server) ->
+    LServer = jid:nameprep(Server),
+    if
+        LServer == error;
+        LServer == <<>> ->
+            {error, {incorrect_server_name, Server}};
+        true ->
+            F = fun () ->
+                        BatchSize = ?BATCH_SIZE,
+                        case ejabberd_sql:sql_query_t(
+                               ?SQL("select @(username)s, @(password)s"
+                                    " from users"
+                                    " where iterationcount=0 and %(LServer)H"
+                                    " limit %(BatchSize)d")) of
+                            {selected, []} ->
+                                ok;
+                            {selected, Rs} ->
+                                lists:foreach(
+                                  fun({LUser, Password}) ->
+					  case jid:resourceprep(Password) of
+					      error ->
+						  ?ERROR_MSG(
+						     "SASLprep failed for "
+						     "password of user ~s@~s",
+						     [LUser, LServer]);
+					      _ ->
+						  Scram = ejabberd_auth:password_to_scram(Password),
+						  set_password_scram_t(
+						    LUser, LServer,
+						    Scram#scram.storedkey,
+						    Scram#scram.serverkey,
+						    Scram#scram.salt,
+						    Scram#scram.iterationcount)
+					  end
+                                  end, Rs),
+                                continue;
+                            Err -> {bad_reply, Err}
+                        end
+                end,
+            case ejabberd_sql:sql_transaction(LServer, F) of
+                {atomic, ok} -> ok;
+                {atomic, continue} -> convert_to_scram(Server);
+                {atomic, Error} -> {error, Error};
+                Error -> Error
             end
     end.
 
@@ -298,3 +323,9 @@ export(_Server) ->
          (_Host, _R) ->
               []
       end}].
+
+-spec opt_type(pgsql_users_number_estimate) -> fun((boolean()) -> boolean());
+	      (atom()) -> [atom()].
+opt_type(pgsql_users_number_estimate) ->
+    fun (V) when is_boolean(V) -> V end;
+opt_type(_) -> [pgsql_users_number_estimate].

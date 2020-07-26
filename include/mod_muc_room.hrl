@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -18,19 +18,21 @@
 %%%
 %%%----------------------------------------------------------------------
 
+-include("ejabberd.hrl").
+
 -define(MAX_USERS_DEFAULT, 200).
 
 -define(SETS, gb_sets).
 
+-define(DICT, dict).
+
 -record(lqueue,
 {
-    queue = p1_queue:new()  :: p1_queue:queue(lqueue_elem()),
-    max   = 0               :: integer()
+    queue   :: p1_queue:queue(),
+    max = 0 :: integer()
 }).
 
 -type lqueue() :: #lqueue{}.
--type lqueue_elem() :: {binary(), message(), boolean(),
-			erlang:timestamp(), non_neg_integer()}.
 
 -record(config,
 {
@@ -61,11 +63,9 @@
     max_users                            = ?MAX_USERS_DEFAULT :: non_neg_integer() | none,
     logging                              = false :: boolean(),
     vcard                                = <<"">> :: binary(),
-    vcard_xupdate                        = undefined :: undefined | external | binary(),
-    captcha_whitelist                    = (?SETS):empty() :: gb_sets:set(),
+    captcha_whitelist                    = (?SETS):empty() :: ?TGB_SET,
     mam                                  = false :: boolean(),
-    pubsub                               = <<"">> :: binary(),
-    lang                                 = ejabberd_option:language() :: binary()
+    pubsub                               = <<"">> :: binary()
 }).
 
 -type config() :: #config{}.
@@ -91,8 +91,8 @@
 {
     message_time    = 0 :: integer(),
     presence_time   = 0 :: integer(),
-    message_shaper  = none :: ejabberd_shaper:shaper(),
-    presence_shaper = none :: ejabberd_shaper:shaper(),
+    message_shaper  = none :: shaper:shaper(),
+    presence_shaper = none :: shaper:shaper(),
     message :: message() | undefined,
     presence :: {binary(), presence()} | undefined
 }).
@@ -102,29 +102,21 @@
     room                    = <<"">> :: binary(),
     host                    = <<"">> :: binary(),
     server_host             = <<"">> :: binary(),
-    access                  = {none,none,none,none,none} :: {atom(), atom(), atom(), atom(), atom()},
+    access                  = {none,none,none,none} :: {atom(), atom(), atom(), atom()},
     jid                     = #jid{} :: jid(),
     config                  = #config{} :: config(),
-    users                   = #{} :: users(),
-    subscribers             = #{} :: subscribers(),
-    subscriber_nicks        = #{} :: subscriber_nicks(),
+    users                   = (?DICT):new() :: ?TDICT,
+    subscribers             = (?DICT):new() :: ?TDICT,
+    subscriber_nicks        = (?DICT):new() :: ?TDICT,
     last_voice_request_time = treap:empty() :: treap:treap(),
-    robots                  = #{} :: robots(),
-    nicks                   = #{} :: nicks(),
-    affiliations            = #{} :: affiliations(),
-    history                 = #lqueue{} :: lqueue(),
+    robots                  = (?DICT):new() :: ?TDICT,
+    nicks                   = (?DICT):new() :: ?TDICT,
+    affiliations            = (?DICT):new() :: ?TDICT,
+    history                 :: lqueue(),
     subject                 = [] :: [text()],
     subject_author          = <<"">> :: binary(),
-    just_created            = erlang:system_time(microsecond) :: true | integer(),
+    just_created            = false :: boolean(),
     activity                = treap:empty() :: treap:treap(),
-    room_shaper             = none :: ejabberd_shaper:shaper(),
-    room_queue              :: p1_queue:queue({message | presence, jid()}) | undefined,
-    hibernate_timer         = none :: reference() | none | hibernating
+    room_shaper             = none :: shaper:shaper(),
+    room_queue              :: p1_queue:queue() | undefined
 }).
-
--type users() :: #{ljid() => #user{}}.
--type robots() :: #{jid() => {binary(), stanza()}}.
--type nicks() :: #{binary() => [ljid()]}.
--type affiliations() :: #{ljid() => affiliation() | {affiliation(), binary()}}.
--type subscribers() :: #{ljid() => #subscriber{}}.
--type subscriber_nicks() :: #{binary() => [ljid()]}.

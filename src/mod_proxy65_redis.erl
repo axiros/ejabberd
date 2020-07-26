@@ -3,7 +3,7 @@
 %%% Created : 31 Mar 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -26,6 +26,7 @@
 %% API
 -export([init/0, register_stream/2, unregister_stream/1, activate_stream/4]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 
 -record(proxy65, {pid_t :: pid(),
@@ -95,7 +96,7 @@ register_stream(SID, Pid) ->
 			    end),
 		ok;
 	      _:badarg ->
-		?ERROR_MSG("Malformed data in redis (key = '~ts'): ~p",
+		?ERROR_MSG("malformed data in redis (key = '~s'): ~p",
 			   [SIDKey, Val]),
 		{error, db_failure}
 	end
@@ -128,7 +129,7 @@ unregister_stream(SID) ->
 	catch _:badarg when Val == undefined ->
 		ok;
 	      _:badarg ->
-		?ERROR_MSG("Malformed data in redis (key = '~ts'): ~p",
+		?ERROR_MSG("malformed data in redis (key = '~s'): ~p",
 			   [SIDKey, Val]),
 		{error, db_failure}
 	end
@@ -163,7 +164,7 @@ activate_stream(SID, IJID, MaxConnections, _Node) ->
 	catch _:badarg when Val == undefined ->
 		{error, notfound};
 	      _:badarg ->
-		?ERROR_MSG("Malformed data in redis (key = '~ts'): ~p",
+		?ERROR_MSG("malformed data in redis (key = '~s'): ~p",
 			   [SIDKey, Val]),
 		{error, db_failure}
 	end

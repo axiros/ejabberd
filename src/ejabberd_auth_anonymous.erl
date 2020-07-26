@@ -5,7 +5,7 @@
 %%% Created : 17 Feb 2006 by Mickael Remond <mremond@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,12 +25,12 @@
 
 -module(ejabberd_auth_anonymous).
 
+-behaviour(ejabberd_config).
 -behaviour(ejabberd_auth).
 -author('mickael.remond@process-one.net').
 
 -export([start/1,
 	 stop/1,
-         use_cache/1,
 	 allow_anonymous/1,
 	 is_sasl_anonymous_enabled/1,
 	 is_login_anonymous_enabled/1,
@@ -42,8 +42,9 @@
 
 -export([login/2, check_password/4, user_exists/2,
 	 get_users/2, count_users/2, store_type/1,
-	 plain_password_required/1]).
+	 plain_password_required/1, opt_type/1]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include("jid.hrl").
 
@@ -59,9 +60,6 @@ stop(Host) ->
 			  ?MODULE, register_connection, 100),
     ejabberd_hooks:delete(sm_remove_connection_hook, Host,
 			  ?MODULE, unregister_connection, 100).
-
-use_cache(_) ->
-    false.
 
 %% Return true if anonymous is allowed for host or false otherwise
 allow_anonymous(Host) ->
@@ -97,12 +95,12 @@ is_login_anonymous_enabled(Host) ->
 %% Return the anonymous protocol to use: sasl_anon|login_anon|both
 %% defaults to login_anon
 anonymous_protocol(Host) ->
-    ejabberd_option:anonymous_protocol(Host).
+    ejabberd_config:get_option({anonymous_protocol, Host}, sasl_anon).
 
 %% Return true if multiple connections have been allowed in the config file
 %% defaults to false
 allow_multiple_connections(Host) ->
-    ejabberd_option:allow_multiple_connections(Host).
+    ejabberd_config:get_option({allow_multiple_connections, Host}, false).
 
 anonymous_user_exist(User, Server) ->
     lists:any(
@@ -113,16 +111,10 @@ anonymous_user_exist(User, Server) ->
 %% Register connection
 -spec register_connection(ejabberd_sm:sid(), jid(), ejabberd_sm:info()) -> ok.
 register_connection(_SID,
-		    #jid{luser = LUser, lserver = LServer, lresource = LResource}, Info) ->
+		    #jid{luser = LUser, lserver = LServer}, Info) ->
     case proplists:get_value(auth_module, Info) of
 	?MODULE ->
-	    % Register user only if we are first resource
-	    case ejabberd_sm:get_user_resources(LUser, LServer) of
-		[LResource] ->
-		    ejabberd_hooks:run(register_user, LServer, [LUser, LServer]);
-		_ ->
-		    ok
-	    end;
+	    ejabberd_hooks:run(register_user, LServer, [LUser, LServer]);
 	_ ->
 	    ok
     end.
@@ -133,13 +125,7 @@ unregister_connection(_SID,
 		      #jid{luser = LUser, lserver = LServer}, Info) ->
     case proplists:get_value(auth_module, Info) of
 	?MODULE ->
-	    % Remove user data only if there is no more resources around
-	    case ejabberd_sm:get_user_resources(LUser, LServer) of
-		[] ->
-		    ejabberd_hooks:run(remove_user, LServer, [LUser, LServer]);
-		_ ->
-		    ok
-	    end;
+	    ejabberd_hooks:run(remove_user, LServer, [LUser, LServer]);
 	_ ->
 	    ok
     end.
@@ -148,14 +134,16 @@ unregister_connection(_SID,
 %% Specific anonymous auth functions
 %% ---------------------------------
 check_password(User, _AuthzId, Server, _Password) ->
-    {nocache,
-     case ejabberd_auth:user_exists_in_other_modules(?MODULE, User, Server) of
-	 %% If user exists in other module, reject anonnymous authentication
-	 true -> false;
-	 %% If we are not sure whether the user exists in other module, reject anon auth
-	 maybe -> false;
-	 false -> login(User, Server)
-     end}.
+    case
+      ejabberd_auth:user_exists_in_other_modules(?MODULE,
+						    User, Server)
+	of
+      %% If user exists in other module, reject anonnymous authentication
+      true -> false;
+      %% If we are not sure whether the user exists in other module, reject anon auth
+      maybe -> false;
+      false -> login(User, Server)
+    end.
 
 login(User, Server) ->
     case is_login_anonymous_enabled(Server) of
@@ -178,10 +166,24 @@ count_users(Server, Opts) ->
     length(get_users(Server, Opts)).
 
 user_exists(User, Server) ->
-    {nocache, anonymous_user_exist(User, Server)}.
+    anonymous_user_exist(User, Server).
 
 plain_password_required(_) ->
     false.
 
 store_type(_) ->
     external.
+
+-spec opt_type(allow_multiple_connection) -> fun((boolean()) -> boolean());
+	      (anonymous_protocol) -> fun((sasl_anon | login_anon | both) ->
+						 sasl_anon | login_anon | both);
+	      (atom()) -> [atom()].
+opt_type(allow_multiple_connections) ->
+    fun (V) when is_boolean(V) -> V end;
+opt_type(anonymous_protocol) ->
+    fun (sasl_anon) -> sasl_anon;
+	(login_anon) -> login_anon;
+	(both) -> both
+    end;
+opt_type(_) ->
+    [allow_multiple_connections, anonymous_protocol].

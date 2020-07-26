@@ -3,7 +3,7 @@
 %%% Created : 16 Nov 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2017   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -91,8 +91,7 @@ get_set(Config) ->
 service_vcard(Config) ->
     JID = server_jid(Config),
     ct:comment("Retreiving vCard from ~s", [jid:encode(JID)]),
-    VCard = mod_vcard_opt:vcard(?config(server, Config)),
-    #iq{type = result, sub_els = [VCard]} =
+    #iq{type = result, sub_els = [#vcard_temp{}]} =
 	send_recv(Config, #iq{type = get, to = JID, sub_els = [#vcard_temp{}]}),
     disconnect(Config).
 

@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -17,43 +17,24 @@
 %%% 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 %%%
 %%%----------------------------------------------------------------------
--define(PRINT(Format, Args), io:format(Format, Args)).
 
--ifdef(LAGER).
+-define(PRINT(Format, Args), io:format(Format, Args)).
 -compile([{parse_transform, lager_transform}]).
 
 -define(DEBUG(Format, Args),
-	begin lager:debug(Format, Args), ok end).
+	lager:debug(Format, Args)).
 
 -define(INFO_MSG(Format, Args),
-	begin lager:info(Format, Args), ok end).
+	lager:info(Format, Args)).
 
 -define(WARNING_MSG(Format, Args),
-	begin lager:warning(Format, Args), ok end).
+	lager:warning(Format, Args)).
 
 -define(ERROR_MSG(Format, Args),
-	begin lager:error(Format, Args), ok end).
+	lager:error(Format, Args)).
 
 -define(CRITICAL_MSG(Format, Args),
-	begin lager:critical(Format, Args), ok end).
--else.
--include_lib("kernel/include/logger.hrl").
-
--define(DEBUG(Format, Args),
-	begin ?LOG_DEBUG(Format, Args), ok end).
-
--define(INFO_MSG(Format, Args),
-	begin ?LOG_INFO(Format, Args), ok end).
-
--define(WARNING_MSG(Format, Args),
-	begin ?LOG_WARNING(Format, Args), ok end).
-
--define(ERROR_MSG(Format, Args),
-	begin ?LOG_ERROR(Format, Args), ok end).
-
--define(CRITICAL_MSG(Format, Args),
-	begin ?LOG_CRITICAL(Format, Args), ok end).
--endif.
+	lager:critical(Format, Args)).
 
 %% Use only when trying to troubleshoot test problem with ExUnit
 -define(EXUNIT_LOG(Format, Args),
@@ -61,6 +42,3 @@
             false -> ok;
             _ -> 'Elixir.Logger':bare_log(error, io_lib:format(Format, Args), [?MODULE])
         end).
-
-%% Uncomment if you want to debug p1_fsm/gen_fsm
-%%-define(DBGFSM, true).

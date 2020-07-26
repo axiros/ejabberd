@@ -5,7 +5,7 @@
 %%% Created : 23 Sep 2010 by Ahmed Omar
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,13 +25,14 @@
 
 -module(mod_pres_counter).
 
--behaviour(gen_mod).
+-behavior(gen_mod).
 
 -export([start/2, stop/1, reload/3, check_packet/4,
-	 mod_opt_type/1, mod_options/1, depends/2, mod_doc/0]).
+	 mod_opt_type/1, depends/2]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
--include("translate.hrl").
+
 -include("xmpp.hrl").
 
 -record(pres_counter,
@@ -78,9 +79,9 @@ check_packet(Acc, _, _, _) ->
     Acc.
 
 update(Server, JID, Dir) ->
-    StormCount = mod_pres_counter_opt:count(Server),
-    TimeInterval = mod_pres_counter_opt:interval(Server),
-    TimeStamp = erlang:system_time(millisecond),
+    StormCount = gen_mod:get_module_opt(Server, ?MODULE, count, 5),
+    TimeInterval = gen_mod:get_module_opt(Server, ?MODULE, interval, 60),
+    TimeStamp = p1_time_compat:system_time(seconds),
     case read(Dir) of
       undefined ->
 	  write(Dir,
@@ -98,14 +99,14 @@ update(Server, JID, Dir) ->
 		 write(Dir, R#pres_counter{logged = true}),
 		 case Dir of
 		   in ->
-		       ?WARNING_MSG("User ~ts is being flooded, ignoring received "
+		       ?WARNING_MSG("User ~s is being flooded, ignoring received "
 				    "presence subscriptions",
 				    [jid:encode(JID)]);
 		   out ->
 		       IP = ejabberd_sm:get_user_ip(JID#jid.luser,
 						    JID#jid.lserver,
 						    JID#jid.lresource),
-		       ?WARNING_MSG("Flooder detected: ~ts, on IP: ~ts ignoring "
+		       ?WARNING_MSG("Flooder detected: ~s, on IP: ~s ignoring "
 				    "sent presence subscriptions~n",
 				    [jid:encode(JID),
 				     misc:ip_to_list(IP)])
@@ -123,39 +124,7 @@ read(K) -> get({pres_counter, K}).
 write(K, V) -> put({pres_counter, K}, V).
 
 mod_opt_type(count) ->
-    econf:pos_int();
+    fun (I) when is_integer(I), I > 0 -> I end;
 mod_opt_type(interval) ->
-    econf:timeout(second).
-
-mod_options(_) ->
-    [{count, 5}, {interval, timer:seconds(60)}].
-
-mod_doc() ->
-    #{desc =>
-          ?T("This module detects flood/spam in presence "
-             "subscriptions traffic. If a user sends or receives "
-             "more of those stanzas in a given time interval, "
-             "the exceeding stanzas are silently dropped, and a "
-             "warning is logged."),
-      opts =>
-          [{count,
-            #{value => ?T("Number"),
-              desc =>
-                  ?T("The number of subscription presence stanzas "
-                     "(subscribe, unsubscribe, subscribed, unsubscribed) "
-                     "allowed for any direction (input or output) per time "
-                     "defined in 'interval' option. Please note that two "
-                     "users subscribing to each other usually generate 4 "
-                     "stanzas, so the recommended value is '4' or more. "
-                     "The default value is '5'.")}},
-           {interval,
-            #{value => "timeout()",
-              desc =>
-                  ?T("The time interval. The default value is '1' minute.")}}],
-      example =>
-          ["modules:",
-           "  ...",
-           "  mod_pres_counter:",
-           "    count: 5",
-           "    interval: 30 secs",
-           "  ..."]}.
+    fun (I) when is_integer(I), I > 0 -> I end;
+mod_opt_type(_) -> [count, interval].

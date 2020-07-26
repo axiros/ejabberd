@@ -5,7 +5,7 @@
 %%% Created : 21 Mar 2007 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,23 +25,27 @@
 
 -module(ejabberd_system_monitor).
 -behaviour(gen_event).
+-behaviour(ejabberd_config).
 
 -author('alexey@process-one.net').
 -author('ekhramtsov@process-one.net').
 
 %% API
--export([start/0, config_reloaded/0]).
+-export([start/0, opt_type/1]).
 
 %% gen_event callbacks
 -export([init/1, handle_event/2, handle_call/2,
 	 handle_info/2, terminate/2, code_change/3]).
 
--include("logger.hrl").
+%% We don't use ejabberd logger because lager can be overloaded
+%% too and alarm_handler may get stuck.
+%%-include("logger.hrl").
 
 -define(CHECK_INTERVAL, timer:seconds(30)).
+-define(DISK_FULL_THRES, 0.99).
 
--record(state, {tref :: undefined | reference(),
-		mref :: undefined | reference()}).
+-record(state, {tref :: reference(),
+		mref :: reference()}).
 -record(proc_stat, {qlen :: non_neg_integer(),
 		    memory :: non_neg_integer(),
 		    initial_call :: mfa(),
@@ -51,7 +55,6 @@
 		    name :: pid() | atom()}).
 -type state() :: #state{}.
 -type proc_stat() :: #proc_stat{}.
--type app_pids() :: #{pid() => atom()}.
 
 %%%===================================================================
 %%% API
@@ -64,35 +67,36 @@ start() ->
     application:set_env(os_mon, start_cpu_sup, false),
     application:set_env(os_mon, start_os_sup, false),
     application:set_env(os_mon, start_memsup, true),
-    application:set_env(os_mon, start_disksup, false),
-    ejabberd:start_app(os_mon),
-    set_oom_watermark().
+    application:set_env(os_mon, start_disksup, true),
+    application:set_env(os_mon, disk_almost_full_threshold, ?DISK_FULL_THRES),
+    ejabberd:start_app(os_mon).
 
 excluded_apps() ->
     [os_mon, mnesia, sasl, stdlib, kernel].
-
--spec config_reloaded() -> ok.
-config_reloaded() ->
-    set_oom_watermark().
 
 %%%===================================================================
 %%% gen_event callbacks
 %%%===================================================================
 init([]) ->
-    ejabberd_hooks:add(config_reloaded, ?MODULE, config_reloaded, 50),
     {ok, #state{}}.
 
 handle_event({set_alarm, {system_memory_high_watermark, _}}, State) ->
+    error_logger:warning_msg(
+      "More than 80% of OS memory is allocated, "
+      "starting OOM watchdog", []),
     handle_overload(State),
     {ok, restart_timer(State)};
 handle_event({clear_alarm, system_memory_high_watermark}, State) ->
-    misc:cancel_timer(State#state.tref),
+    cancel_timer(State#state.tref),
+    error_logger:info_msg(
+      "Memory consumption is back to normal, "
+      "stopping OOM watchdog", []),
     {ok, State#state{tref = undefined}};
 handle_event({set_alarm, {process_memory_high_watermark, Pid}}, State) ->
     case proc_stat(Pid, get_app_pids()) of
 	#proc_stat{name = Name} = ProcStat ->
-	    ?WARNING_MSG(
-	      "Process ~p consumes more than 5% of OS memory (~ts)~n",
+	    error_logger:warning_msg(
+	      "Process ~p consumes more than 5% of OS memory (~s)",
 	      [Name, format_proc(ProcStat)]),
 	    handle_overload(State),
 	    {ok, State};
@@ -101,8 +105,14 @@ handle_event({set_alarm, {process_memory_high_watermark, Pid}}, State) ->
     end;
 handle_event({clear_alarm, process_memory_high_watermark}, State) ->
     {ok, State};
+handle_event({set_alarm, {{disk_almost_full, MountPoint}, _}}, State) ->
+    error_logger:warning_msg("Disk is almost full on ~p", [MountPoint]),
+    {ok, State};
+handle_event({clear_alarm, {disk_almost_full, MountPoint}}, State) ->
+    error_logger:info_msg("Disk usage is back to normal on ~p", [MountPoint]),
+    {ok, State};
 handle_event(Event, State) ->
-    ?WARNING_MSG("unexpected event: ~p~n", [Event]),
+    error_logger:warning_msg("unexpected event: ~p", [Event]),
     {ok, State}.
 
 handle_call(_Request, State) ->
@@ -112,11 +122,11 @@ handle_info({timeout, _TRef, handle_overload}, State) ->
     handle_overload(State),
     {ok, restart_timer(State)};
 handle_info(Info, State) ->
-    ?WARNING_MSG("unexpected info: ~p~n", [Info]),
+    error_logger:warning_msg("unexpected info: ~p", [Info]),
     {ok, State}.
 
 terminate(_Reason, _State) ->
-    ejabberd_hooks:delete(config_reloaded, ?MODULE, config_reloaded, 50).
+    ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -132,14 +142,13 @@ handle_overload(State) ->
 handle_overload(_State, Procs) ->
     AppPids = get_app_pids(),
     {TotalMsgs, ProcsNum, Apps, Stats} = overloaded_procs(AppPids, Procs),
-    MaxMsgs = ejabberd_option:oom_queue(),
-    if TotalMsgs >= MaxMsgs ->
+    if TotalMsgs >= 10000 ->
 	    SortedStats = lists:reverse(lists:keysort(#proc_stat.qlen, Stats)),
-	    ?WARNING_MSG(
+	    error_logger:warning_msg(
 	      "The system is overloaded with ~b messages "
 	      "queued by ~b process(es) (~b%) "
-	      "from the following applications: ~ts; "
-	      "the top processes are:~n~ts~n",
+	      "from the following applications: ~s; "
+	      "the top processes are:~n~s",
 	      [TotalMsgs, ProcsNum,
 	       round(ProcsNum*100/length(Procs)),
 	       format_apps(Apps),
@@ -150,7 +159,7 @@ handle_overload(_State, Procs) ->
     end,
     lists:foreach(fun erlang:garbage_collect/1, Procs).
 
--spec get_app_pids() -> app_pids().
+-spec get_app_pids() -> map().
 get_app_pids() ->
     try application:info() of
 	Info ->
@@ -169,7 +178,7 @@ get_app_pids() ->
 	    #{}
     end.
 
--spec overloaded_procs(app_pids(), [pid()])
+-spec overloaded_procs(map(), [pid()])
       -> {non_neg_integer(), non_neg_integer(), dict:dict(), [proc_stat()]}.
 overloaded_procs(AppPids, AllProcs) ->
     lists:foldl(
@@ -185,7 +194,7 @@ overloaded_procs(AppPids, AllProcs) ->
 	      end
       end, {0, 0, dict:new(), []}, AllProcs).
 
--spec proc_stat(pid(), app_pids()) -> proc_stat() | undefined.
+-spec proc_stat(pid(), map()) -> proc_stat() | undefined.
 proc_stat(Pid, AppPids) ->
     case process_info(Pid, [message_queue_len,
 			    memory,
@@ -218,18 +227,31 @@ proc_stat(Pid, AppPids) ->
 
 -spec restart_timer(#state{}) -> #state{}.
 restart_timer(State) ->
-    misc:cancel_timer(State#state.tref),
+    cancel_timer(State#state.tref),
     TRef = erlang:start_timer(?CHECK_INTERVAL, self(), handle_overload),
     State#state{tref = TRef}.
 
--spec format_apps(dict:dict()) -> iodata().
+-spec cancel_timer(reference()) -> ok.
+cancel_timer(undefined) ->
+    ok;
+cancel_timer(TRef) ->
+    case erlang:cancel_timer(TRef) of
+        false ->
+            receive {timeout, TRef, _} -> ok
+            after 0 -> ok
+            end;
+        _ ->
+            ok
+    end.
+
+-spec format_apps(dict:dict()) -> io:data().
 format_apps(Apps) ->
     AppList = lists:reverse(lists:keysort(2, dict:to_list(Apps))),
     string:join(
       [io_lib:format("~p (~b msgs)", [App, Msgs]) || {App, Msgs} <- AppList],
       ", ").
 
--spec format_top_procs([proc_stat()]) -> iodata().
+-spec format_top_procs([proc_stat()]) -> io:data().
 format_top_procs(Stats) ->
     Stats1 = lists:sublist(Stats, 5),
     string:join(
@@ -239,24 +261,24 @@ format_top_procs(Stats) ->
 	end,Stats1),
       io_lib:nl()).
 
--spec format_proc(proc_stat()) -> iodata().
+-spec format_proc(proc_stat()) -> io:data().
 format_proc(#proc_stat{qlen = Len, memory = Mem, initial_call = InitCall,
 		       current_function = CurrFun, ancestors = Ancs,
 		       application = App}) ->
     io_lib:format(
-      "msgs = ~b, memory = ~b, initial_call = ~ts, "
-      "current_function = ~ts, ancestors = ~w, application = ~w",
+      "msgs = ~b, memory = ~b, initial_call = ~s, "
+      "current_function = ~s, ancestors = ~w, application = ~w",
       [Len, Mem, format_mfa(InitCall), format_mfa(CurrFun), Ancs, App]).
 
--spec format_mfa(mfa()) -> iodata().
+-spec format_mfa(mfa()) -> io:data().
 format_mfa({M, F, A}) when is_atom(M), is_atom(F), is_integer(A) ->
-    io_lib:format("~ts:~ts/~b", [M, F, A]);
+    io_lib:format("~s:~s/~b", [M, F, A]);
 format_mfa(WTF) ->
     io_lib:format("~w", [WTF]).
 
 -spec kill([proc_stat()], non_neg_integer()) -> ok.
 kill(Stats, Threshold) ->
-    case ejabberd_option:oom_killer() of
+    case ejabberd_config:get_option(oom_killer, true) of
 	true ->
 	    do_kill(Stats, Threshold);
 	false ->
@@ -270,15 +292,16 @@ do_kill(Stats, Threshold) ->
 		     when Len >= Threshold ->
 		       case lists:member(App, excluded_apps()) of
 			   true ->
-			       ?WARNING_MSG(
+			       error_logger:warning_msg(
 				 "Unable to kill process ~p from whitelisted "
-				 "application ~p~n", [Name, App]),
+				 "application ~p", [Name, App]),
 			       false;
 			   false ->
 			       case kill_proc(Name) of
 				   false ->
 				       false;
 				   Pid ->
+				       maybe_restart_app(App),
 				       {true, Pid}
 			       end
 		       end;
@@ -287,8 +310,8 @@ do_kill(Stats, Threshold) ->
 	       end, Stats),
     TotalKilled = length(Killed),
     if TotalKilled > 0 ->
-	    ?ERROR_MSG(
-	      "Killed ~b process(es) consuming more than ~b message(s) each~n",
+	    error_logger:error_msg(
+	      "Killed ~b process(es) consuming more than ~b message(s) each",
 	      [TotalKilled, Threshold]);
        true ->
 	    ok
@@ -303,7 +326,14 @@ kill_proc(Pid) ->
     exit(Pid, kill),
     Pid.
 
--spec set_oom_watermark() -> ok.
-set_oom_watermark() ->
-    WaterMark = ejabberd_option:oom_watermark(),
-    memsup:set_sysmem_high_watermark(WaterMark/100).
+-spec maybe_restart_app(atom()) -> any().
+maybe_restart_app(lager) ->
+    ejabberd_logger:restart();
+maybe_restart_app(_) ->
+    ok.
+
+-spec opt_type(oom_killer) -> fun((boolean()) -> boolean());
+	      (atom()) -> [atom()].
+opt_type(oom_killer) ->
+    fun(B) when is_boolean(B) -> B end;
+opt_type(_) -> [oom_killer].

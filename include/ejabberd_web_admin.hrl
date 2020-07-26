@@ -1,6 +1,6 @@
 %%%----------------------------------------------------------------------
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -37,12 +37,14 @@
 -define(XAC(Name, Attrs, Text),
 	?XAE(Name, Attrs, [?C(Text)])).
 
--define(CT(Text), ?C((translate:translate(Lang, Text)))).
+-define(T(Text), translate:translate(Lang, Text)).
 
--define(XCT(Name, Text), ?XC(Name, (translate:translate(Lang, Text)))).
+-define(CT(Text), ?C((?T(Text)))).
+
+-define(XCT(Name, Text), ?XC(Name, (?T(Text)))).
 
 -define(XACT(Name, Attrs, Text),
-	?XAC(Name, Attrs, (translate:translate(Lang, Text)))).
+	?XAC(Name, Attrs, (?T(Text)))).
 
 -define(LI(Els), ?XE(<<"li">>, Els)).
 
@@ -51,7 +53,7 @@
 
 -define(AC(URL, Text), ?A(URL, [?C(Text)])).
 
--define(ACT(URL, Text), ?AC(URL, (translate:translate(Lang, Text)))).
+-define(ACT(URL, Text), ?AC(URL, (?T(Text)))).
 
 -define(P, ?X(<<"p">>)).
 
@@ -63,7 +65,7 @@
 	     {<<"value">>, Value}])).
 
 -define(INPUTT(Type, Name, Value),
-	?INPUT(Type, Name, (translate:translate(Lang, Value)))).
+	?INPUT(Type, Name, (?T(Value)))).
 
 -define(INPUTS(Type, Name, Value, Size),
 	?XA(<<"input">>,
@@ -71,7 +73,7 @@
 	     {<<"value">>, Value}, {<<"size">>, Size}])).
 
 -define(INPUTST(Type, Name, Value, Size),
-	?INPUT(Type, Name, (translate:translate(Lang, Value)), Size)).
+	?INPUT(Type, Name, (?T(Value)), Size)).
 
 -define(ACLINPUT(Text),
 	?XE(<<"td">>,
@@ -88,14 +90,14 @@
 	?XAC(<<"p">>, [{<<"class">>, <<"result">>}], Text)).
 
 %% Guide Link
--define(XREST(Text), ?XRES((translate:translate(Lang, Text)))).
+-define(XREST(Text), ?XRES((?T(Text)))).
 
 -define(GL(Ref, Title),
 	?XAE(<<"div">>, [{<<"class">>, <<"guidelink">>}],
 	     [?XAE(<<"a">>,
-		   [{<<"href">>, <<"https://docs.ejabberd.im/admin/configuration/", Ref/binary>>},
+		   [{<<"href">>, <<"/admin/doc/guide.html#", Ref/binary>>},
 		    {<<"target">>, <<"_blank">>}],
-		   [?C(<<"docs: ", Title/binary>>)])])).
+		   [?C(<<"[Guide: ", Title/binary, "]">>)])])).
 
 %% h1 with a Guide Link
 -define(H1GL(Name, Ref, Title),

@@ -4,7 +4,7 @@
 %%% Created : 13 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -33,7 +33,8 @@
 -export([register_online_room/4, unregister_online_room/4, find_online_room/3,
 	 get_online_rooms/3, count_online_rooms/2, rsm_supported/0,
 	 register_online_user/4, unregister_online_user/4,
-	 count_online_rooms_by_user/3, get_online_rooms_by_user/3]).
+	 count_online_rooms_by_user/3, get_online_rooms_by_user/3,
+	 get_subscribed_rooms/3]).
 -export([set_affiliation/6, set_affiliations/4, get_affiliation/5,
 	 get_affiliations/3, search_affiliation/4]).
 %% gen_server callbacks
@@ -262,17 +263,16 @@ unregister_online_user(_ServerHost, {U, S, R}, Room, Host) ->
 		      #muc_online_users{us = {U, S}, resource = R,
 					room = Room, host = Host}).
 
-count_online_rooms_by_user(ServerHost, U, S) ->
-    MucHost = hd(gen_mod:get_module_opt_hosts(ServerHost, mod_muc)),
+count_online_rooms_by_user(_ServerHost, U, S) ->
     ets:select_count(
       muc_online_users,
       ets:fun2ms(
-	fun(#muc_online_users{us = {U1, S1}, host = Host}) ->
-		U == U1 andalso S == S1 andalso MucHost == Host
+	fun(#muc_online_users{us = {U1, S1}}) ->
+		U == U1 andalso S == S1
 	end)).
 
 get_online_rooms_by_user(ServerHost, U, S) ->
-    MucHost = hd(gen_mod:get_module_opt_hosts(ServerHost, mod_muc)),
+    MucHost = gen_mod:get_module_opt_host(ServerHost, mod_muc, <<"conference.@HOST@">>),
     ets:select(
       muc_online_users,
       ets:fun2ms(
@@ -296,9 +296,9 @@ import(_LServer, <<"muc_registered">>,
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
-init([_Host, Opts]) ->
-    MyHosts = mod_muc_opt:hosts(Opts),
-    case gen_mod:db_mod(Opts, mod_muc) of
+init([Host, Opts]) ->
+    MyHosts = proplists:get_value(hosts, Opts),
+    case gen_mod:db_mod(Host, Opts, mod_muc) of
 	?MODULE ->
 	    ejabberd_mnesia:create(?MODULE, muc_room,
 				   [{disc_copies, [node()]},
@@ -312,7 +312,7 @@ init([_Host, Opts]) ->
 	_ ->
 	    ok
     end,
-    case gen_mod:ram_db_mod(Opts, mod_muc) of
+    case gen_mod:ram_db_mod(Host, Opts, mod_muc) of
 	?MODULE ->
 	    ejabberd_mnesia:create(?MODULE, muc_online_room,
 				   [{ram_copies, [node()]},
@@ -329,21 +329,18 @@ init([_Host, Opts]) ->
     end,
     {ok, #state{}}.
 
-handle_call(Request, From, State) ->
-    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
-    {noreply, State}.
+handle_call(_Request, _From, State) ->
+    Reply = ok,
+    {reply, Reply, State}.
 
-handle_cast(Msg, State) ->
-    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({mnesia_system_event, {mnesia_down, Node}}, State) ->
     clean_table_from_bad_node(Node),
     {noreply, State};
-handle_info({mnesia_system_event, {mnesia_up, _Node}}, State) ->
-    {noreply, State};
 handle_info(Info, State) ->
-    ?WARNING_MSG("Unexpected info: ~p", [Info]),
+    ?ERROR_MSG("unexpected info: ~p", [Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -383,11 +380,11 @@ clean_table_from_bad_node(Node, Host) ->
         end,
     mnesia:async_dirty(F).
 
-need_transform({muc_room, {N, H}, _})
+need_transform(#muc_room{name_host = {N, H}})
   when is_list(N) orelse is_list(H) ->
     ?INFO_MSG("Mnesia table 'muc_room' will be converted to binary", []),
     true;
-need_transform({muc_registered, {{U, S}, H}, Nick})
+need_transform(#muc_registered{us_host = {{U, S}, H}, nick = Nick})
   when is_list(U) orelse is_list(S) orelse is_list(H) orelse is_list(Nick) ->
     ?INFO_MSG("Mnesia table 'muc_registered' will be converted to binary", []),
     true;
@@ -401,3 +398,6 @@ transform(#muc_registered{us_host = {{U, S}, H}, nick = Nick} = R) ->
     R#muc_registered{us_host = {{iolist_to_binary(U), iolist_to_binary(S)},
 				iolist_to_binary(H)},
 		     nick = iolist_to_binary(Nick)}.
+
+get_subscribed_rooms(_, _, _) ->
+    not_implemented.

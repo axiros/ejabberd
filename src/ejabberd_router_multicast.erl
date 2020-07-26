@@ -5,7 +5,7 @@
 %%% Created : 11 Aug 2007 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -41,6 +41,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include("xmpp.hrl").
 
@@ -136,9 +137,9 @@ init([]) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call(Request, From, State) ->
-    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
-    {noreply, State}.
+handle_call(_Request, _From, State) ->
+    Reply = ok,
+    {reply, Reply, State}.
 
 %%--------------------------------------------------------------------
 %% Function: handle_cast(Msg, State) -> {noreply, State} |
@@ -146,8 +147,7 @@ handle_call(Request, From, State) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
-handle_cast(Msg, State) ->
-    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -183,8 +183,7 @@ handle_info({'DOWN', _Ref, _Type, Pid, _Info}, State) ->
 	end,
     mnesia:transaction(F),
     {noreply, State};
-handle_info(Info, State) ->
-    ?WARNING_MSG("Unexpected info: ~p", [Info]),
+handle_info(_Info, State) ->
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -211,7 +210,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Destinations = [#jid]
 -spec do_route(binary(), [jid()], stanza()) -> any().
 do_route(Domain, Destinations, Packet) ->
-    ?DEBUG("Route multicast:~n~ts~nDomain: ~ts~nDestinations: ~ts~n",
+    ?DEBUG("route multicast:~n~s~nDomain: ~s~nDestinations: ~s~n",
 	   [xmpp:pp(Packet), Domain,
 	    str:join([jid:encode(To) || To <- Destinations], <<", ">>)]),
     %% Try to find an appropriate multicast service

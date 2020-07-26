@@ -5,7 +5,7 @@
 %%% Created : 15 Jul 2017 by Holger Weiss <holger@zedat.fu-berlin.de>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2020 ProcessOne
+%%% ejabberd, Copyright (C) 2017-2018 ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -26,20 +26,19 @@
 -module(mod_push_keepalive).
 -author('holger@zedat.fu-berlin.de').
 
--behaviour(gen_mod).
+-behavior(gen_mod).
 
 %% gen_mod callbacks.
--export([start/2, stop/1, reload/3, mod_opt_type/1, mod_options/1, depends/2]).
--export([mod_doc/0]).
+-export([start/2, stop/1, reload/3, mod_opt_type/1, depends/2]).
+
 %% ejabberd_hooks callbacks.
 -export([c2s_session_pending/1, c2s_session_resumed/1, c2s_copy_session/2,
 	 c2s_handle_cast/2, c2s_handle_info/2, c2s_stanza/3]).
 
 -include("logger.hrl").
 -include("xmpp.hrl").
--include("translate.hrl").
 
--define(PUSH_BEFORE_TIMEOUT_PERIOD, 120000). % 2 minutes.
+-define(PUSH_BEFORE_TIMEOUT_SECS, 120).
 
 -type c2s_state() :: ejabberd_c2s:state().
 
@@ -48,7 +47,7 @@
 %%--------------------------------------------------------------------
 -spec start(binary(), gen_mod:opts()) -> ok.
 start(Host, Opts) ->
-    case mod_push_keepalive_opt:wake_on_start(Opts) of
+    case gen_mod:get_opt(wake_on_start, Opts, false) of
 	true ->
 	    wake_all(Host);
 	false ->
@@ -62,13 +61,13 @@ stop(Host) ->
 
 -spec reload(binary(), gen_mod:opts(), gen_mod:opts()) -> ok.
 reload(Host, NewOpts, OldOpts) ->
-    case {mod_push_keepalive_opt:wake_on_start(NewOpts),
-	  mod_push_keepalive_opt:wake_on_start(OldOpts)} of
-	{true, false} ->
+    case gen_mod:is_equal_opt(wake_on_start, NewOpts, OldOpts, false) of
+	{false, true, _} ->
 	    wake_all(Host);
 	_ ->
 	    ok
-    end.
+    end,
+    ok.
 
 -spec depends(binary(), gen_mod:opts()) -> [{module(), hard | soft}].
 depends(_Host, _Opts) ->
@@ -76,59 +75,24 @@ depends(_Host, _Opts) ->
      {mod_client_state, soft},
      {mod_stream_mgmt, soft}].
 
--spec mod_opt_type(atom()) -> econf:validator().
+-spec mod_opt_type(atom()) -> fun((term()) -> term()) | [atom()].
 mod_opt_type(resume_timeout) ->
-    econf:either(
-      econf:int(0, 0),
-      econf:timeout(second));
+    fun(I) when is_integer(I), I >= 0 -> I;
+       (undefined) -> undefined
+    end;
 mod_opt_type(wake_on_start) ->
-    econf:bool();
+    fun (B) when is_boolean(B) -> B end;
 mod_opt_type(wake_on_timeout) ->
-    econf:bool().
-
-mod_options(_Host) ->
-    [{resume_timeout, timer:seconds(259200)},
-     {wake_on_start, false},
-     {wake_on_timeout, true}].
-
-mod_doc() ->
-    #{desc =>
-          [?T("This module tries to keep the stream management "
-              "session (see 'mod_stream_mgmt') of a disconnected "
-              "mobile client alive if the client enabled push "
-              "notifications for that session. However, the normal "
-              "session resumption timeout is restored once a push "
-              "notification is issued, so the session will be closed "
-              "if the client doesn't respond to push notifications."), "",
-           ?T("The module depends on 'mod_push'.")],
-      opts =>
-          [{resume_timeout,
-            #{value => "timeout()",
-              desc =>
-                  ?T("This option specifies the period of time until "
-                     "the session of a disconnected push client times out. "
-                     "This timeout is only in effect as long as no push "
-                     "notification is issued. Once that happened, the "
-                     "resumption timeout configured for the 'mod_stream_mgmt' "
-                     "module is restored. "
-                     "The default value is '72' minutes.")}},
-           {wake_on_start,
-            #{value => "true | false",
-              desc =>
-                  ?T("If this option is set to 'true', notifications "
-                     "are generated for **all** registered push clients "
-                     "during server startup. This option should not be "
-                     "enabled on servers with many push clients as it "
-                     "can generate significant load on the involved push "
-                     "services and the server itself. "
-                     "The default value is 'false'.")}},
-           {wake_on_timeout,
-            #{value => "true | false",
-              desc =>
-                  ?T("If this option is set to 'true', a notification "
-                     "is generated shortly before the session would time "
-                     "out as per the 'resume_timeout' option. "
-                     "The default value is 'true'.")}}]}.
+    fun (B) when is_boolean(B) -> B end;
+mod_opt_type(O) when O == cache_life_time; O == cache_size ->
+    fun(I) when is_integer(I), I > 0 -> I;
+       (infinity) -> infinity
+    end;
+mod_opt_type(O) when O == use_cache; O == cache_missed ->
+    fun (B) when is_boolean(B) -> B end;
+mod_opt_type(_) ->
+    [resume_timeout, wake_on_start, wake_on_timeout, cache_life_time,
+     cache_size, use_cache, cache_missed, iqdisc].
 
 %%--------------------------------------------------------------------
 %% Register/unregister hooks.
@@ -150,6 +114,8 @@ register_hooks(Host) ->
 
 -spec unregister_hooks(binary()) -> ok.
 unregister_hooks(Host) ->
+    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE,
+			  disco_sm_features, 50),
     ejabberd_hooks:delete(c2s_session_pending, Host, ?MODULE,
 			  c2s_session_pending, 50),
     ejabberd_hooks:delete(c2s_session_resumed, Host, ?MODULE,
@@ -168,24 +134,18 @@ unregister_hooks(Host) ->
 %%--------------------------------------------------------------------
 -spec c2s_stanza(c2s_state(), xmpp_element() | xmlel(), term()) -> c2s_state().
 c2s_stanza(#{push_enabled := true, mgmt_state := pending} = State,
-	   Pkt, _SendResult) ->
-    case mod_push:is_incoming_chat_msg(Pkt) of
-	true ->
-	    maybe_restore_resume_timeout(State);
-	false ->
-	    State
-    end;
+	   _Pkt, _SendResult) ->
+    maybe_restore_resume_timeout(State);
 c2s_stanza(State, _Pkt, _SendResult) ->
     State.
 
 -spec c2s_session_pending(c2s_state()) -> c2s_state().
 c2s_session_pending(#{push_enabled := true, mgmt_queue := Queue} = State) ->
-    case mod_stream_mgmt:queue_find(fun mod_push:is_incoming_chat_msg/1,
-				    Queue) of
-	none ->
+    case p1_queue:len(Queue) of
+	0 ->
 	    State1 = maybe_adjust_resume_timeout(State),
 	    maybe_start_wakeup_timer(State1);
-	_Msg ->
+	_ ->
 	    State
     end;
 c2s_session_pending(State) ->
@@ -200,22 +160,18 @@ c2s_session_resumed(State) ->
 -spec c2s_copy_session(c2s_state(), c2s_state()) -> c2s_state().
 c2s_copy_session(State, #{push_enabled := true,
 			  push_resume_timeout := ResumeTimeout,
-			  push_wake_on_timeout := WakeOnTimeout} = OldState) ->
-    State1 = case maps:find(push_resume_timeout_orig, OldState) of
-		 {ok, Val} ->
-		     State#{push_resume_timeout_orig => Val};
-		 error ->
-		     State
-	     end,
-    State1#{push_resume_timeout => ResumeTimeout,
-	    push_wake_on_timeout => WakeOnTimeout};
+			  push_wake_on_timeout := WakeOnTimeout}) ->
+    State#{push_resume_timeout => ResumeTimeout,
+	   push_wake_on_timeout => WakeOnTimeout};
 c2s_copy_session(State, _) ->
     State.
 
 -spec c2s_handle_cast(c2s_state(), any()) -> c2s_state().
 c2s_handle_cast(#{lserver := LServer} = State, push_enable) ->
-    ResumeTimeout = mod_push_keepalive_opt:resume_timeout(LServer),
-    WakeOnTimeout = mod_push_keepalive_opt:wake_on_timeout(LServer),
+    ResumeTimeout = gen_mod:get_module_opt(LServer, ?MODULE,
+					   resume_timeout, 86400),
+    WakeOnTimeout = gen_mod:get_module_opt(LServer, ?MODULE,
+					   wake_on_timeout, true),
     State#{push_resume_timeout => ResumeTimeout,
 	   push_wake_on_timeout => WakeOnTimeout};
 c2s_handle_cast(State, push_disable) ->
@@ -227,8 +183,8 @@ c2s_handle_cast(State, _Msg) ->
 -spec c2s_handle_info(c2s_state(), any()) -> c2s_state() | {stop, c2s_state()}.
 c2s_handle_info(#{push_enabled := true, mgmt_state := pending,
 		  jid := JID} = State, {timeout, _, push_keepalive}) ->
-    ?INFO_MSG("Waking ~ts before session times out", [jid:encode(JID)]),
-    mod_push:notify(State, none, undefined),
+    ?INFO_MSG("Waking ~s before session times out", [jid:encode(JID)]),
+    mod_push:notify(State),
     {stop, State};
 c2s_handle_info(State, _) ->
     State.
@@ -241,13 +197,13 @@ maybe_adjust_resume_timeout(#{push_resume_timeout := undefined} = State) ->
     State;
 maybe_adjust_resume_timeout(#{push_resume_timeout := Timeout} = State) ->
     OrigTimeout = mod_stream_mgmt:get_resume_timeout(State),
-    ?DEBUG("Adjusting resume timeout to ~B seconds", [Timeout div 1000]),
+    ?DEBUG("Adjusting resume timeout to ~B seconds", [Timeout]),
     State1 = mod_stream_mgmt:set_resume_timeout(State, Timeout),
     State1#{push_resume_timeout_orig => OrigTimeout}.
 
 -spec maybe_restore_resume_timeout(c2s_state()) -> c2s_state().
 maybe_restore_resume_timeout(#{push_resume_timeout_orig := Timeout} = State) ->
-    ?DEBUG("Restoring resume timeout to ~B seconds", [Timeout div 1000]),
+    ?DEBUG("Restoring resume timeout to ~B seconds", [Timeout]),
     State1 = mod_stream_mgmt:set_resume_timeout(State, Timeout),
     maps:remove(push_resume_timeout_orig, State1);
 maybe_restore_resume_timeout(State) ->
@@ -256,26 +212,25 @@ maybe_restore_resume_timeout(State) ->
 -spec maybe_start_wakeup_timer(c2s_state()) -> c2s_state().
 maybe_start_wakeup_timer(#{push_wake_on_timeout := true,
 			   push_resume_timeout := ResumeTimeout} = State)
-  when is_integer(ResumeTimeout), ResumeTimeout > ?PUSH_BEFORE_TIMEOUT_PERIOD ->
-    WakeTimeout = ResumeTimeout - ?PUSH_BEFORE_TIMEOUT_PERIOD,
-    ?DEBUG("Scheduling wake-up timer to fire in ~B seconds", [WakeTimeout div 1000]),
-    erlang:start_timer(WakeTimeout, self(), push_keepalive),
+  when is_integer(ResumeTimeout), ResumeTimeout > ?PUSH_BEFORE_TIMEOUT_SECS ->
+    WakeTimeout = ResumeTimeout - ?PUSH_BEFORE_TIMEOUT_SECS,
+    ?DEBUG("Scheduling wake-up timer to fire in ~B seconds", [WakeTimeout]),
+    erlang:start_timer(timer:seconds(WakeTimeout), self(), push_keepalive),
     State;
 maybe_start_wakeup_timer(State) ->
     State.
 
--spec wake_all(binary()) -> ok.
+-spec wake_all(binary()) -> ok | error.
 wake_all(LServer) ->
-    ?INFO_MSG("Waking all push clients on ~ts", [LServer]),
+    ?INFO_MSG("Waking all push clients on ~s", [LServer]),
     Mod = gen_mod:db_mod(LServer, mod_push),
     case Mod:lookup_sessions(LServer) of
 	{ok, Sessions} ->
 	    IgnoreResponse = fun(_) -> ok end,
 	    lists:foreach(fun({_, PushLJID, Node, XData}) ->
 				  mod_push:notify(LServer, PushLJID, Node,
-						  XData, none, undefined,
-						  IgnoreResponse)
+						  XData, IgnoreResponse)
 			  end, Sessions);
 	error ->
-	    ok
+	    error
     end.

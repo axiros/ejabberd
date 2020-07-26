@@ -5,7 +5,7 @@
 %%% Created :  1 Dec 2007 by Christophe Romain <christophe.romain@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -30,18 +30,18 @@
 %%% <p>PubSub node tree plugins are using the {@link gen_nodetree} behaviour.</p>
 %%% <p><strong>The API isn't stabilized yet</strong>. The pubsub plugin
 %%% development is still a work in progress. However, the system is already
-%%% usable and useful as is. Please, send us comments, feedback and
+%%% useable and useful as is. Please, send us comments, feedback and
 %%% improvements.</p>
 
 -module(nodetree_tree_sql).
 -behaviour(gen_pubsub_nodetree).
 -author('christophe.romain@process-one.net').
 
+-compile([{parse_transform, ejabberd_sql_pt}]).
 
 -include("pubsub.hrl").
 -include("xmpp.hrl").
 -include("ejabberd_sql_pt.hrl").
--include("translate.hrl").
 
 -export([init/3, terminate/2, options/0, set_node/1,
     get_node/3, get_node/2, get_node/1, get_nodes/2,
@@ -93,8 +93,8 @@ set_node(Record) when is_record(Record, pubsub_node) ->
     end,
     case Nidx of
 	none ->
-	    Txt = ?T("Node index not found"),
-	    {error, xmpp:err_internal_server_error(Txt, ejabberd_option:language())};
+	    Txt = <<"Node index not found">>,
+	    {error, xmpp:err_internal_server_error(Txt, ?MYLANG)};
 	_ ->
 	    lists:foreach(fun ({Key, Value}) ->
 			SKey = iolist_to_binary(atom_to_list(Key)),
@@ -121,9 +121,9 @@ get_node(Host, Node) ->
 	{selected, [RItem]} ->
 	    raw_to_node(Host, RItem);
 	{'EXIT', _Reason} ->
-	    {error, xmpp:err_internal_server_error(?T("Database failure"), ejabberd_option:language())};
+	    {error, xmpp:err_internal_server_error(<<"Database failure">>, ?MYLANG)};
 	_ ->
-	    {error, xmpp:err_item_not_found(?T("Node not found"), ejabberd_option:language())}
+	    {error, xmpp:err_item_not_found(<<"Node not found">>, ?MYLANG)}
     end.
 
 get_node(Nidx) ->
@@ -135,30 +135,21 @@ get_node(Nidx) ->
 	{selected, [{Host, Node, Parent, Type}]} ->
 	    raw_to_node(Host, {Node, Parent, Type, Nidx});
 	{'EXIT', _Reason} ->
-	    {error, xmpp:err_internal_server_error(?T("Database failure"), ejabberd_option:language())};
+	    {error, xmpp:err_internal_server_error(<<"Database failure">>, ?MYLANG)};
 	_ ->
-	    {error, xmpp:err_item_not_found(?T("Node not found"), ejabberd_option:language())}
+	    {error, xmpp:err_item_not_found(<<"Node not found">>, ?MYLANG)}
     end.
 
-get_nodes(Host) ->
-    get_nodes(Host, infinity).
+get_nodes(Host, _From) ->
+    get_nodes(Host).
 
-get_nodes(Host, Limit) ->
+get_nodes(Host) ->
     H = node_flat_sql:encode_host(Host),
-    Query = fun(mssql, _) when is_integer(Limit), Limit>=0 ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select top %(Limit)d @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s"));
-	       (_, _) when is_integer(Limit), Limit>=0 ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s limit %(Limit)d"));
-	       (_, _) ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s"))
-	    end,
-    case ejabberd_sql:sql_query_t(Query) of
+    case catch
+	ejabberd_sql:sql_query_t(
+	  ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d from pubsub_node "
+	       "where host=%(H)s"))
+    of
 	{selected, RItems} ->
 	    [raw_to_node(Host, Item) || Item <- RItems];
 	_ ->
@@ -187,23 +178,16 @@ get_parentnodes_tree(Host, Node, Level, Acc) ->
 	    Acc
     end.
 
-get_subnodes(Host, Node, Limit) ->
+get_subnodes(Host, Node, _From) ->
+    get_subnodes(Host, Node).
+
+get_subnodes(Host, Node) ->
     H = node_flat_sql:encode_host(Host),
-    Query = fun(mssql, _) when is_integer(Limit), Limit>=0 ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select top %(Limit)d @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s and parent=%(Node)s"));
-	       (_, _) when is_integer(Limit), Limit>=0 ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s and parent=%(Node)s "
-			   "limit %(Limit)d"));
-	       (_, _) ->
-		    ejabberd_sql:sql_query_t(
-		      ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d "
-			   "from pubsub_node where host=%(H)s and parent=%(Node)s"))
-	    end,
-    case ejabberd_sql:sql_query_t(Query) of
+    case catch
+	ejabberd_sql:sql_query_t(
+	  ?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d from pubsub_node "
+	       "where host=%(H)s and parent=%(Node)s"))
+    of
 	{selected, RItems} ->
 	    [raw_to_node(Host, Item) || Item <- RItems];
 	_ ->
@@ -220,12 +204,12 @@ get_subnodes_tree(Host, Node) ->
 	Rec ->
 	    Type = Rec#pubsub_node.type,
 	    H = node_flat_sql:encode_host(Host),
-	    N = <<(ejabberd_sql:escape_like_arg(Node))/binary, "/%">>,
+	    N = <<(ejabberd_sql:escape_like_arg_circumflex(Node))/binary, "/%">>,
 	    Sub = case catch
 		ejabberd_sql:sql_query_t(
 		?SQL("select @(node)s, @(parent)s, @(plugin)s, @(nodeid)d from pubsub_node "
 		     "where host=%(H)s and plugin=%(Type)s and"
-		     " (parent=%(Node)s or parent like %(N)s %ESCAPE)"))
+		     " (parent=%(Node)s or parent like %(N)s escape '^')"))
 	    of
 		{selected, RItems} ->
 		    [raw_to_node(Host, Item) || Item <- RItems];
@@ -275,9 +259,9 @@ create_node(Host, Node, Type, Owner, Options, Parents) ->
 		    {error, xmpp:err_forbidden()}
 	    end;
 	{result, _} ->
-	    {error, xmpp:err_conflict(?T("Node already exists"), ejabberd_option:language())};
+	    {error, xmpp:err_conflict(<<"Node already exists">>, ?MYLANG)};
 	{error, db_fail} ->
-	    {error, xmpp:err_internal_server_error(?T("Database failure"), ejabberd_option:language())}
+	    {error, xmpp:err_internal_server_error(<<"Database failure">>, ?MYLANG)}
     end.
 
 delete_node(Host, Node) ->

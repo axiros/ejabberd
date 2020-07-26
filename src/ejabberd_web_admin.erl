@@ -5,7 +5,7 @@
 %%% Created :  9 Apr 2004 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -27,12 +27,15 @@
 
 -module(ejabberd_web_admin).
 
+-behaviour(ejabberd_config).
+
 -author('alexey@process-one.net').
 
 -export([process/2, list_users/4,
 	 list_users_in_diapason/4, pretty_print_xml/1,
-	 term_to_id/1]).
+	 term_to_id/1, opt_type/1]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 
 -include("xmpp.hrl").
@@ -40,8 +43,6 @@
 -include("ejabberd_http.hrl").
 
 -include("ejabberd_web_admin.hrl").
-
--include("translate.hrl").
 
 -define(INPUTATTRS(Type, Name, Value, Attrs),
 	?XA(<<"input">>,
@@ -70,18 +71,30 @@ get_acl_rule([<<"additions.js">>], _) ->
 %% This page only displays vhosts that the user is admin:
 get_acl_rule([<<"vhosts">>], _) ->
     {<<"localhost">>, [all]};
-%% The pages of a vhost are only accessible if the user is admin of that vhost:
+%% The pages of a vhost are only accesible if the user is admin of that vhost:
 get_acl_rule([<<"server">>, VHost | _RPath], Method)
     when Method =:= 'GET' orelse Method =:= 'HEAD' ->
-    {VHost, [configure, webadmin_view]};
+    AC = gen_mod:get_module_opt(VHost, ejabberd_web_admin,
+				access, configure),
+    ACR = gen_mod:get_module_opt(VHost, ejabberd_web_admin,
+				 access_readonly, webadmin_view),
+    {VHost, [AC, ACR]};
 get_acl_rule([<<"server">>, VHost | _RPath], 'POST') ->
-    {VHost, [configure]};
+    AC = gen_mod:get_module_opt(VHost, ejabberd_web_admin,
+				access, configure),
+    {VHost, [AC]};
 %% Default rule: only global admins can access any other random page
 get_acl_rule(_RPath, Method)
     when Method =:= 'GET' orelse Method =:= 'HEAD' ->
-    {global, [configure, webadmin_view]};
+    AC = gen_mod:get_module_opt(global, ejabberd_web_admin,
+				access, configure),
+    ACR = gen_mod:get_module_opt(global, ejabberd_web_admin,
+				 access_readonly, webadmin_view),
+    {global, [AC, ACR]};
 get_acl_rule(_RPath, 'POST') ->
-    {global, [configure]}.
+    AC = gen_mod:get_module_opt(global, ejabberd_web_admin,
+				access, configure),
+    {global, [AC]}.
 
 %%%==================================
 %%%% Menu Items Access
@@ -95,20 +108,20 @@ get_jid(Auth, HostHTTP, Method) ->
 	  throw({unauthorized, Auth})
     end.
 
-get_menu_items(global, cluster, Lang, JID, Level) ->
-    {_Base, _, Items} = make_server_menu([], [], Lang, JID, Level),
+get_menu_items(global, cluster, Lang, JID) ->
+    {Base, _, Items} = make_server_menu([], [], Lang, JID),
     lists:map(fun ({URI, Name}) ->
-		      {<<URI/binary, "/">>, Name};
+		      {<<Base/binary, URI/binary, "/">>, Name};
 		  ({URI, Name, _SubMenu}) ->
-		      {<<URI/binary, "/">>, Name}
+		      {<<Base/binary, URI/binary, "/">>, Name}
 	      end,
 	      Items);
-get_menu_items(Host, cluster, Lang, JID, Level) ->
-    {_Base, _, Items} = make_host_menu(Host, [], Lang, JID, Level),
+get_menu_items(Host, cluster, Lang, JID) ->
+    {Base, _, Items} = make_host_menu(Host, [], Lang, JID),
     lists:map(fun ({URI, Name}) ->
-		      {<<URI/binary, "/">>, Name};
+		      {<<Base/binary, URI/binary, "/">>, Name};
 		  ({URI, Name, _SubMenu}) ->
-		      {<<URI/binary, "/">>, Name}
+		      {<<Base/binary, URI/binary, "/">>, Name}
 	      end,
 	      Items).
 
@@ -132,7 +145,7 @@ is_allowed_path([<<"admin">> | Path], JID) ->
     is_allowed_path(Path, JID);
 is_allowed_path(Path, JID) ->
     {HostOfRule, AccessRule} = get_acl_rule(Path, 'GET'),
-    any_rules_allowed(HostOfRule, AccessRule, JID).
+    acl:any_rules_allowed(HostOfRule, AccessRule, JID).
 
 %% @spec(Path) -> URL
 %% where Path = [string()]
@@ -150,21 +163,31 @@ url_to_path(URL) -> str:tokens(URL, <<"/">>).
 %%%==================================
 %%%% process/2
 
-process(Path, #request{raw_path = RawPath} = Request) ->
-    Continue = case Path of
-		   [E] ->
-		       binary:match(E, <<".">>) /= nomatch;
-		   _ ->
-		       false
-	       end,
-    case Continue orelse binary:at(RawPath, size(RawPath) - 1) == $/ of
-	true ->
-	    process2(Path, Request);
-	_ ->
-	    {301, [{<<"Location">>, <<RawPath/binary, "/">>}], <<>>}
-    end.
-
-process2([<<"server">>, SHost | RPath] = Path,
+process([<<"doc">>, LocalFile], _Request) ->
+    DocPath = case os:getenv("EJABBERD_DOC_PATH") of
+		P when is_list(P) -> P;
+		false -> <<"/share/doc/ejabberd/">>
+	      end,
+    FileName = filename:join(DocPath, LocalFile),
+    case file:read_file(FileName) of
+      {ok, FileContents} ->
+	  ?DEBUG("Delivering content.", []),
+	  {200, [{<<"Server">>, <<"ejabberd">>}], FileContents};
+      {error, Error} ->
+	  Help = <<" ", FileName/binary,
+		   " - Try to specify the path to ejabberd "
+		   "documentation with the environment variable "
+		   "EJABBERD_DOC_PATH. Check the ejabberd "
+		   "Guide for more information.">>,
+	  ?INFO_MSG("Problem '~p' accessing the local Guide file ~s", [Error, Help]),
+	  case Error of
+	    eacces -> {403, [], <<"Forbidden", Help/binary>>};
+	    enoent -> {307, [{<<"Location">>, <<"http://docs.ejabberd.im/admin/guide/configuration/">>}], <<"Not found", Help/binary>>};
+	    _Else ->
+		{404, [], <<(iolist_to_binary(atom_to_list(Error)))/binary, Help/binary>>}
+	  end
+    end;
+process([<<"server">>, SHost | RPath] = Path,
 	#request{auth = Auth, lang = Lang, host = HostHTTP,
 		 method = Method} =
 	    Request) ->
@@ -176,14 +199,14 @@ process2([<<"server">>, SHost | RPath] = Path,
 		AJID = get_jid(Auth, HostHTTP, Method),
 		process_admin(Host,
 			      Request#request{path = RPath,
-					      us = {User, Server}},
-			      AJID);
+					      auth = {auth_jid, Auth, AJID},
+					      us = {User, Server}});
 	    {unauthorized, <<"no-auth-provided">>} ->
 		{401,
 		 [{<<"WWW-Authenticate">>,
 		   <<"basic realm=\"ejabberd\"">>}],
 		 ejabberd_web:make_xhtml([?XCT(<<"h1">>,
-					       ?T("Unauthorized"))])};
+					       <<"Unauthorized">>)])};
 	    {unauthorized, Error} ->
 		{BadUser, _BadPass} = Auth,
 		{IPT, _Port} = Request#request.ip,
@@ -195,39 +218,39 @@ process2([<<"server">>, SHost | RPath] = Path,
 		   <<"basic realm=\"auth error, retry login "
 		     "to ejabberd\"">>}],
 		 ejabberd_web:make_xhtml([?XCT(<<"h1">>,
-					       ?T("Unauthorized"))])}
+					       <<"Unauthorized">>)])}
 	  end;
       false -> ejabberd_web:error(not_found)
     end;
-process2(RPath,
+process(RPath,
 	#request{auth = Auth, lang = Lang, host = HostHTTP,
 		 method = Method} =
 	    Request) ->
     case get_auth_admin(Auth, HostHTTP, RPath, Method) of
-	{ok, {User, Server}} ->
-	    AJID = get_jid(Auth, HostHTTP, Method),
-	    process_admin(global,
-			  Request#request{path = RPath,
-					  us = {User, Server}},
-			  AJID);
-	{unauthorized, <<"no-auth-provided">>} ->
-	    {401,
-	     [{<<"WWW-Authenticate">>,
-	       <<"basic realm=\"ejabberd\"">>}],
-	     ejabberd_web:make_xhtml([?XCT(<<"h1">>,
-					   ?T("Unauthorized"))])};
-	{unauthorized, Error} ->
-	    {BadUser, _BadPass} = Auth,
-	    {IPT, _Port} = Request#request.ip,
-	    IPS = ejabberd_config:may_hide_data(misc:ip_to_list(IPT)),
-	    ?WARNING_MSG("Access of ~p from ~p failed with error: ~p",
-			 [BadUser, IPS, Error]),
-	    {401,
-	     [{<<"WWW-Authenticate">>,
-	       <<"basic realm=\"auth error, retry login "
-		 "to ejabberd\"">>}],
-	     ejabberd_web:make_xhtml([?XCT(<<"h1">>,
-					   ?T("Unauthorized"))])}
+      {ok, {User, Server}} ->
+	  AJID = get_jid(Auth, HostHTTP, Method),
+	  process_admin(global,
+			Request#request{path = RPath,
+					auth = {auth_jid, Auth, AJID},
+					us = {User, Server}});
+      {unauthorized, <<"no-auth-provided">>} ->
+	  {401,
+	   [{<<"WWW-Authenticate">>,
+	     <<"basic realm=\"ejabberd\"">>}],
+	   ejabberd_web:make_xhtml([?XCT(<<"h1">>,
+					 <<"Unauthorized">>)])};
+      {unauthorized, Error} ->
+	  {BadUser, _BadPass} = Auth,
+	  {IPT, _Port} = Request#request.ip,
+	  IPS = ejabberd_config:may_hide_data(misc:ip_to_list(IPT)),
+	  ?WARNING_MSG("Access of ~p from ~p failed with error: ~p",
+		       [BadUser, IPS, Error]),
+	  {401,
+	   [{<<"WWW-Authenticate">>,
+	     <<"basic realm=\"auth error, retry login "
+	       "to ejabberd\"">>}],
+	   ejabberd_web:make_xhtml([?XCT(<<"h1">>,
+					 <<"Unauthorized">>)])}
     end.
 
 get_auth_admin(Auth, HostHTTP, RPath, Method) ->
@@ -236,36 +259,23 @@ get_auth_admin(Auth, HostHTTP, RPath, Method) ->
 	  {HostOfRule, AccessRule} = get_acl_rule(RPath, Method),
 	    try jid:decode(SJID) of
 		#jid{user = <<"">>, server = User} ->
-		    case ejabberd_router:is_my_host(HostHTTP) of
-			true ->
-			    get_auth_account(HostOfRule, AccessRule, User, HostHTTP,
-					     Pass);
-			_ ->
-			    {unauthorized, <<"missing-server">>}
-		    end;
+		    get_auth_account(HostOfRule, AccessRule, User, HostHTTP,
+				     Pass);
 		#jid{user = User, server = Server} ->
 		    get_auth_account(HostOfRule, AccessRule, User, Server,
 				     Pass)
 	    catch _:{bad_jid, _} ->
 		    {unauthorized, <<"badformed-jid">>}
 	    end;
-      invalid -> {unauthorized, <<"no-auth-provided">>};
       undefined -> {unauthorized, <<"no-auth-provided">>}
     end.
 
 get_auth_account(HostOfRule, AccessRule, User, Server,
 		 Pass) ->
-    case lists:member(Server, ejabberd_config:get_option(hosts)) of
-	true -> get_auth_account2(HostOfRule, AccessRule, User, Server, Pass);
-	false -> {unauthorized, <<"inexistent-host">>}
-    end.
-
-get_auth_account2(HostOfRule, AccessRule, User, Server,
-		 Pass) ->
     case ejabberd_auth:check_password(User, <<"">>, Server, Pass) of
       true ->
-	  case any_rules_allowed(HostOfRule, AccessRule,
-				 jid:make(User, Server))
+	  case acl:any_rules_allowed(HostOfRule, AccessRule,
+			    jid:make(User, Server))
 	      of
 	    false -> {unauthorized, <<"unprivileged-account">>};
 	    true -> {ok, {User, Server}}
@@ -280,16 +290,16 @@ get_auth_account2(HostOfRule, AccessRule, User, Server,
 %%%==================================
 %%%% make_xhtml
 
-make_xhtml(Els, Host, Lang, JID, Level) ->
-    make_xhtml(Els, Host, cluster, Lang, JID, Level).
+make_xhtml(Els, Host, Lang, JID) ->
+    make_xhtml(Els, Host, cluster, Lang, JID).
 
 %% @spec (Els, Host, Node, Lang, JID) -> {200, [html], xmlelement()}
 %% where Host = global | string()
 %%       Node = cluster | atom()
 %%       JID = jid()
-make_xhtml(Els, Host, Node, Lang, JID, Level) ->
-    Base = get_base_path_sum(0, 0, Level),
-    MenuItems = make_navigation(Host, Node, Lang, JID, Level),
+make_xhtml(Els, Host, Node, Lang, JID) ->
+    Base = get_base_path(Host, cluster),
+    MenuItems = make_navigation(Host, Node, Lang, JID),
     {200, [html],
      #xmlel{name = <<"html">>,
 	    attrs =
@@ -298,7 +308,7 @@ make_xhtml(Els, Host, Node, Lang, JID, Level) ->
 	    children =
 		[#xmlel{name = <<"head">>, attrs = [],
 			children =
-			    [?XCT(<<"title">>, ?T("ejabberd Web Admin")),
+			    [?XCT(<<"title">>, <<"ejabberd Web Admin">>),
 			     #xmlel{name = <<"meta">>,
 				    attrs =
 					[{<<"http-equiv">>, <<"Content-Type">>},
@@ -308,7 +318,7 @@ make_xhtml(Els, Host, Node, Lang, JID, Level) ->
 			     #xmlel{name = <<"script">>,
 				    attrs =
 					[{<<"src">>,
-					  <<Base/binary, "additions.js">>},
+					  <<Base/binary, "/additions.js">>},
 					 {<<"type">>, <<"text/javascript">>}],
 				    children = [?C(<<" ">>)]},
 			     #xmlel{name = <<"link">>,
@@ -329,7 +339,7 @@ make_xhtml(Els, Host, Node, Lang, JID, Level) ->
 		     [?XAE(<<"div">>, [{<<"id">>, <<"container">>}],
 			   [?XAE(<<"div">>, [{<<"id">>, <<"header">>}],
 				 [?XE(<<"h1">>,
-				      [?ACT(Base,
+				      [?ACT(<<"/admin/">>,
 					    <<"ejabberd Web Admin">>)])]),
 			    ?XAE(<<"div">>, [{<<"id">>, <<"navigation">>}],
 				 [?XE(<<"ul">>, MenuItems)]),
@@ -340,26 +350,23 @@ make_xhtml(Els, Host, Node, Lang, JID, Level) ->
 			   [?XAE(<<"div">>, [{<<"id">>, <<"copyright">>}],
 				 [?XE(<<"p">>,
 				  [?AC(<<"https://www.ejabberd.im/">>, <<"ejabberd">>),
-				   ?C(<<" (c) 2002-2020 ">>),
+				   ?C(<<" (c) 2002-2018 ">>),
 				   ?AC(<<"https://www.process-one.net/">>, <<"ProcessOne, leader in messaging and push solutions">>)]
                                  )])])])]}}.
 
+direction(ltr) -> [{<<"dir">>, <<"ltr">>}];
 direction(<<"he">>) -> [{<<"dir">>, <<"rtl">>}];
 direction(_) -> [].
 
-get_base_path(Host, Node, Level) ->
-    SumHost = case Host of
-        global -> 0;
-        _ -> -2
-    end,
-    SumNode = case Node of
-        cluster -> 0;
-        _ -> -2
-    end,
-    get_base_path_sum(SumHost, SumNode, Level).
-
-get_base_path_sum(SumHost, SumNode, Level) ->
-    iolist_to_binary(lists:duplicate(Level + SumHost + SumNode, "../")).
+get_base_path(global, cluster) -> <<"/admin/">>;
+get_base_path(Host, cluster) ->
+    <<"/admin/server/", Host/binary, "/">>;
+get_base_path(global, Node) ->
+    <<"/admin/node/",
+      (iolist_to_binary(atom_to_list(Node)))/binary, "/">>;
+get_base_path(Host, Node) ->
+    <<"/admin/server/", Host/binary, "/node/",
+      (iolist_to_binary(atom_to_list(Node)))/binary, "/">>.
 
 %%%==================================
 %%%% css & images
@@ -373,7 +380,7 @@ additions_js() ->
 css(Host) ->
     case misc:read_css("admin.css") of
 	{ok, CSS} ->
-	    Base = get_base_path(Host, cluster, 0),
+	    Base = get_base_path(Host, cluster),
 	    re:replace(CSS, <<"@BASE@">>, Base, [{return, binary}]);
 	{error, _} ->
 	    <<>>
@@ -400,76 +407,303 @@ logo_fill() ->
 %%%==================================
 %%%% process_admin
 
-process_admin(global, #request{path = [], lang = Lang}, AJID) ->
-    make_xhtml((?H1GL((translate:translate(Lang, ?T("Administration"))), <<"">>,
+process_admin(global,
+	      #request{path = [], auth = {_, _, AJID},
+		       lang = Lang}) ->
+    make_xhtml((?H1GL((?T(<<"Administration">>)), <<"">>,
 		      <<"Contents">>))
 		 ++
 		 [?XE(<<"ul">>,
 		      [?LI([?ACT(MIU, MIN)])
 		       || {MIU, MIN}
-			      <- get_menu_items(global, cluster, Lang, AJID, 0)])],
-	       global, Lang, AJID, 0);
-process_admin(Host, #request{path = [], lang = Lang}, AJID) ->
-    make_xhtml([?XCT(<<"h1">>, ?T("Administration")),
+			      <- get_menu_items(global, cluster, Lang, AJID)])],
+	       global, Lang, AJID);
+process_admin(Host,
+	      #request{path = [], auth = {_, _Auth, AJID},
+		       lang = Lang}) ->
+    make_xhtml([?XCT(<<"h1">>, <<"Administration">>),
 		?XE(<<"ul">>,
 		    [?LI([?ACT(MIU, MIN)])
 		     || {MIU, MIN}
-			    <- get_menu_items(Host, cluster, Lang, AJID, 2)])],
-	       Host, Lang, AJID, 2);
-process_admin(Host, #request{path = [<<"style.css">>]}, _) ->
+			    <- get_menu_items(Host, cluster, Lang, AJID)])],
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"style.css">>]}) ->
     {200,
      [{<<"Content-Type">>, <<"text/css">>}, last_modified(),
       cache_control_public()],
      css(Host)};
-process_admin(_Host, #request{path = [<<"favicon.ico">>]}, _) ->
+process_admin(_Host,
+	      #request{path = [<<"favicon.ico">>]}) ->
     {200,
      [{<<"Content-Type">>, <<"image/x-icon">>},
       last_modified(), cache_control_public()],
      favicon()};
-process_admin(_Host, #request{path = [<<"logo.png">>]}, _) ->
+process_admin(_Host,
+	      #request{path = [<<"logo.png">>]}) ->
     {200,
      [{<<"Content-Type">>, <<"image/png">>}, last_modified(),
       cache_control_public()],
      logo()};
-process_admin(_Host, #request{path = [<<"logo-fill.png">>]}, _) ->
+process_admin(_Host,
+	      #request{path = [<<"logo-fill.png">>]}) ->
     {200,
      [{<<"Content-Type">>, <<"image/png">>}, last_modified(),
       cache_control_public()],
      logo_fill()};
-process_admin(_Host, #request{path = [<<"additions.js">>]}, _) ->
+process_admin(_Host,
+	      #request{path = [<<"additions.js">>]}) ->
     {200,
      [{<<"Content-Type">>, <<"text/javascript">>},
       last_modified(), cache_control_public()],
      additions_js()};
-process_admin(global, #request{path = [<<"vhosts">>], lang = Lang}, AJID) ->
+process_admin(Host,
+	      #request{path = [<<"acls-raw">>], q = Query,
+		       auth = {_, _Auth, AJID}, lang = Lang}) ->
+    Res = case lists:keysearch(<<"acls">>, 1, Query) of
+	    {value, {_, String}} ->
+		case erl_scan:string(binary_to_list(String)) of
+		  {ok, Tokens, _} ->
+		      case erl_parse:parse_term(Tokens) of
+			{ok, NewACLs} ->
+			    case catch acl:add_list(Host, NewACLs, true) of
+				ok -> ok;
+				_ -> error
+			    end;
+			_ -> error
+		      end;
+		  _ -> error
+		end;
+	    _ -> nothing
+	  end,
+    ACLs = lists:keysort(2,
+			 mnesia:dirty_select(acl,
+				    [{{acl, {'$1', Host}, '$2'}, [],
+				      [{{acl, '$1', '$2'}}]}])),
+    {NumLines, ACLsP} = term_to_paragraph(ACLs, 80),
+    make_xhtml((?H1GL((?T(<<"Access Control Lists">>)),
+		      <<"acldefinition">>, <<"ACL Definition">>))
+		 ++
+		 case Res of
+		   ok -> [?XREST(<<"Submitted">>)];
+		   error -> [?XREST(<<"Bad format">>)];
+		   nothing -> []
+		 end
+		   ++
+		   [?XAE(<<"form">>,
+			 [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}]++direction(ltr),
+			 [?TEXTAREA(<<"acls">>,
+				    (integer_to_binary(lists:max([16,
+										 NumLines]))),
+				    <<"80">>, <<(iolist_to_binary(ACLsP))/binary, ".">>),
+			  ?BR,
+			  ?INPUTT(<<"submit">>, <<"submit">>, <<"Submit">>)])],
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{method = Method, path = [<<"acls">>],
+		       auth = {_, _Auth, AJID}, q = Query, lang = Lang}) ->
+    ?DEBUG("query: ~p", [Query]),
+    Res = case Method of
+	    'POST' ->
+		case catch acl_parse_query(Host, Query) of
+		  {'EXIT', _} -> error;
+		  NewACLs ->
+			?INFO_MSG("NewACLs at ~s: ~p", [Host, NewACLs]),
+			case catch acl:add_list(Host, NewACLs, true) of
+			    ok -> ok;
+			    _ -> error
+			end
+		end;
+	    _ -> nothing
+	  end,
+    ACLs = lists:keysort(2,
+			 mnesia:dirty_select(acl,
+				    [{{acl, {'$1', Host}, '$2'}, [],
+				      [{{acl, '$1', '$2'}}]}])),
+    make_xhtml((?H1GL((?T(<<"Access Control Lists">>)),
+		      <<"acldefinition">>, <<"ACL Definition">>))
+		 ++
+		 case Res of
+		   ok -> [?XREST(<<"Submitted">>)];
+		   error -> [?XREST(<<"Bad format">>)];
+		   nothing -> []
+		 end
+		   ++
+		   [?XAE(<<"p">>, direction(ltr), [?ACT(<<"../acls-raw/">>, <<"Raw">>)])] ++
+		     [?XAE(<<"form">>,
+			   [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}]++direction(ltr),
+			   [acls_to_xhtml(ACLs), ?BR,
+			    ?INPUTT(<<"submit">>, <<"delete">>,
+				    <<"Delete Selected">>),
+			    ?C(<<" ">>),
+			    ?INPUTT(<<"submit">>, <<"submit">>,
+				    <<"Submit">>)])],
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"access-raw">>],
+		       auth = {_, _Auth, AJID}, q = Query, lang = Lang}) ->
+    SetAccess = fun (Rs) ->
+			mnesia:transaction(fun () ->
+						   Os = mnesia:select(access,
+								      [{{access,
+									 {'$1',
+									  Host},
+									 '$2'},
+									[],
+									['$_']}]),
+						   lists:foreach(fun (O) ->
+									 mnesia:delete_object(O)
+								 end,
+								 Os),
+						   lists:foreach(fun ({access,
+								       Name,
+								       Rules}) ->
+									 mnesia:write({access,
+										       {Name,
+											Host},
+										       Rules})
+								 end,
+								 Rs)
+					   end)
+		end,
+    Res = case lists:keysearch(<<"access">>, 1, Query) of
+	    {value, {_, String}} ->
+		case erl_scan:string(binary_to_list(String)) of
+		  {ok, Tokens, _} ->
+		      case erl_parse:parse_term(Tokens) of
+			{ok, Rs} ->
+			    case SetAccess(Rs) of
+			      {atomic, _} -> ok;
+			      _ -> error
+			    end;
+			_ -> error
+		      end;
+		  _ -> error
+		end;
+	    _ -> nothing
+	  end,
+    Access = mnesia:dirty_select(access,
+			[{{access, {'$1', Host}, '$2'}, [],
+			  [{{access, '$1', '$2'}}]}]),
+    {NumLines, AccessP} = term_to_paragraph(lists:keysort(2,Access), 80),
+    make_xhtml((?H1GL((?T(<<"Access Rules">>)),
+		      <<"accessrights">>, <<"Access Rights">>))
+		 ++
+		 case Res of
+		   ok -> [?XREST(<<"Submitted">>)];
+		   error -> [?XREST(<<"Bad format">>)];
+		   nothing -> []
+		 end
+		   ++
+		   [?XAE(<<"form">>,
+			 [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}]++direction(ltr),
+			 [?TEXTAREA(<<"access">>,
+				    (integer_to_binary(lists:max([16,
+										 NumLines]))),
+				    <<"80">>, <<(iolist_to_binary(AccessP))/binary, ".">>),
+			  ?BR,
+			  ?INPUTT(<<"submit">>, <<"submit">>, <<"Submit">>)])],
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{method = Method, path = [<<"access">>],
+		       q = Query, auth = {_, _Auth, AJID}, lang = Lang}) ->
+    ?DEBUG("query: ~p", [Query]),
+    Res = case Method of
+	    'POST' ->
+		case catch access_parse_query(Host, Query) of
+		  {'EXIT', _} -> error;
+		  ok -> ok
+		end;
+	    _ -> nothing
+	  end,
+    AccessRules = mnesia:dirty_select(access,
+			     [{{access, {'$1', Host}, '$2'}, [],
+			       [{{access, '$1', '$2'}}]}]),
+    make_xhtml((?H1GL((?T(<<"Access Rules">>)),
+		      <<"accessrights">>, <<"Access Rights">>))
+		 ++
+		 case Res of
+		   ok -> [?XREST(<<"Submitted">>)];
+		   error -> [?XREST(<<"Bad format">>)];
+		   nothing -> []
+		 end
+		   ++
+		   [?XAE(<<"p">>, direction(ltr), [?ACT(<<"../access-raw/">>, <<"Raw">>)])]
+		     ++
+		     [?XAE(<<"form">>,
+			   [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}]++direction(ltr),
+			   [access_rules_to_xhtml(AccessRules, Lang), ?BR,
+			    ?INPUTT(<<"submit">>, <<"delete">>,
+				    <<"Delete Selected">>)])],
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"access">>, SName], q = Query,
+		       auth = {_, _Auth, AJID}, lang = Lang}) ->
+    ?DEBUG("query: ~p", [Query]),
+    Name = misc:binary_to_atom(SName),
+    Res = case lists:keysearch(<<"rules">>, 1, Query) of
+	    {value, {_, String}} ->
+		case parse_access_rule(String) of
+		  {ok, Rs} ->
+		      ejabberd_config:add_option({access, Name, Host},
+							Rs),
+		      ok;
+		  _ -> error
+		end;
+	    _ -> nothing
+	  end,
+    Rules = ejabberd_config:get_option({access, Name, Host}, []),
+    make_xhtml([?XC(<<"h1">>,
+		    (str:format(
+                                     ?T(<<"~s access rule configuration">>),
+                                     [SName])))]
+		 ++
+		 case Res of
+		   ok -> [?XREST(<<"Submitted">>)];
+		   error -> [?XREST(<<"Bad format">>)];
+		   nothing -> []
+		 end
+		   ++
+		   [?XAE(<<"form">>,
+			 [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
+			 [access_rule_to_xhtml(Rules), ?BR,
+			  ?INPUTT(<<"submit">>, <<"submit">>, <<"Submit">>)])],
+	       Host, Lang, AJID);
+process_admin(global,
+	      #request{path = [<<"vhosts">>], auth = {_, _Auth, AJID},
+		       lang = Lang}) ->
     Res = list_vhosts(Lang, AJID),
-    make_xhtml((?H1GL((translate:translate(Lang, ?T("Virtual Hosts"))),
-		      <<"basic/#xmpp-domains">>, ?T("XMPP Domains")))
+    make_xhtml((?H1GL((?T(<<"Virtual Hosts">>)),
+		      <<"virtualhosting">>, <<"Virtual Hosting">>))
 		 ++ Res,
-	       global, Lang, AJID, 1);
-process_admin(Host,  #request{path = [<<"users">>], q = Query,
-			      lang = Lang}, AJID)
+	       global, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"users">>], q = Query,
+		       auth = {_, _Auth, AJID}, lang = Lang})
     when is_binary(Host) ->
     Res = list_users(Host, Query, Lang, fun url_func/1),
-    make_xhtml([?XCT(<<"h1">>, ?T("Users"))] ++ Res, Host,
-	       Lang, AJID, 3);
-process_admin(Host, #request{path = [<<"users">>, Diap],
-			     lang = Lang}, AJID)
+    make_xhtml([?XCT(<<"h1">>, <<"Users">>)] ++ Res, Host,
+	       Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"users">>, Diap],
+		       auth = {_, _Auth, AJID}, lang = Lang})
     when is_binary(Host) ->
     Res = list_users_in_diapason(Host, Diap, Lang,
 				 fun url_func/1),
-    make_xhtml([?XCT(<<"h1">>, ?T("Users"))] ++ Res, Host,
-	       Lang, AJID, 4);
-process_admin(Host, #request{path = [<<"online-users">>],
-			     lang = Lang}, AJID)
+    make_xhtml([?XCT(<<"h1">>, <<"Users">>)] ++ Res, Host,
+	       Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"online-users">>],
+		       auth = {_, _Auth, AJID}, lang = Lang})
     when is_binary(Host) ->
     Res = list_online_users(Host, Lang),
-    make_xhtml([?XCT(<<"h1">>, ?T("Online Users"))] ++ Res,
-	       Host, Lang, AJID, 3);
-process_admin(Host, #request{path = [<<"last-activity">>],
-			     q = Query, lang = Lang}, AJID)
+    make_xhtml([?XCT(<<"h1">>, <<"Online Users">>)] ++ Res,
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"last-activity">>],
+		       auth = {_, _Auth, AJID}, q = Query, lang = Lang})
     when is_binary(Host) ->
-    ?DEBUG("Query: ~p", [Query]),
+    ?DEBUG("query: ~p", [Query]),
     Month = case lists:keysearch(<<"period">>, 1, Query) of
 	      {value, {_, Val}} -> Val;
 	      _ -> <<"month">>
@@ -479,11 +713,11 @@ process_admin(Host, #request{path = [<<"last-activity">>],
 		list_last_activity(Host, Lang, false, Month);
 	    _ -> list_last_activity(Host, Lang, true, Month)
 	  end,
-    PageH1 = ?H1GL(translate:translate(Lang, ?T("Users Last Activity")), <<"modules/#mod-last">>, <<"mod_last">>),
-    make_xhtml(PageH1 ++
+    make_xhtml([?XCT(<<"h1">>, <<"Users Last Activity">>)]
+		 ++
 		 [?XAE(<<"form">>,
 		       [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
-		       [?CT(?T("Period: ")),
+		       [?CT(<<"Period: ">>),
 			?XAE(<<"select">>, [{<<"name">>, <<"period">>}],
 			     (lists:map(fun ({O, V}) ->
 						Sel = if O == Month ->
@@ -496,60 +730,56 @@ process_admin(Host, #request{path = [<<"last-activity">>],
 							[{<<"value">>, O}]),
 						     V)
 					end,
-					[{<<"month">>, translate:translate(Lang, ?T("Last month"))},
-					 {<<"year">>, translate:translate(Lang, ?T("Last year"))},
+					[{<<"month">>, ?T(<<"Last month">>)},
+					 {<<"year">>, ?T(<<"Last year">>)},
 					 {<<"all">>,
-					  translate:translate(Lang, ?T("All activity"))}]))),
+					  ?T(<<"All activity">>)}]))),
 			?C(<<" ">>),
 			?INPUTT(<<"submit">>, <<"ordinary">>,
-				?T("Show Ordinary Table")),
+				<<"Show Ordinary Table">>),
 			?C(<<" ">>),
 			?INPUTT(<<"submit">>, <<"integral">>,
-				?T("Show Integral Table"))])]
+				<<"Show Integral Table">>)])]
 		   ++ Res,
-	       Host, Lang, AJID, 3);
-process_admin(Host, #request{path = [<<"stats">>], lang = Lang}, AJID) ->
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"stats">>], auth = {_, _Auth, AJID},
+		       lang = Lang}) ->
     Res = get_stats(Host, Lang),
-    PageH1 = ?H1GL(translate:translate(Lang, ?T("Statistics")), <<"modules/#mod-stats">>, <<"mod_stats">>),
-    Level = case Host of
-	global -> 1;
-	_ -> 3
-    end,
-    make_xhtml(PageH1 ++ Res, Host, Lang, AJID, Level);
-process_admin(Host, #request{path = [<<"user">>, U],
-			     q = Query, lang = Lang}, AJID) ->
+    make_xhtml([?XCT(<<"h1">>, <<"Statistics">>)] ++ Res,
+	       Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"user">>, U],
+		       auth = {_, _Auth, AJID}, q = Query, lang = Lang}) ->
     case ejabberd_auth:user_exists(U, Host) of
       true ->
 	  Res = user_info(U, Host, Query, Lang),
-	  make_xhtml(Res, Host, Lang, AJID, 4);
+	  make_xhtml(Res, Host, Lang, AJID);
       false ->
-	  make_xhtml([?XCT(<<"h1">>, ?T("Not Found"))], Host,
-		     Lang, AJID, 4)
+	  make_xhtml([?XCT(<<"h1">>, <<"Not Found">>)], Host,
+		     Lang, AJID)
     end;
-process_admin(Host, #request{path = [<<"nodes">>], lang = Lang}, AJID) ->
+process_admin(Host,
+	      #request{path = [<<"nodes">>], auth = {_, _Auth, AJID},
+		       lang = Lang}) ->
     Res = get_nodes(Lang),
-    Level = case Host of
-	global -> 1;
-	_ -> 3
-    end,
-    make_xhtml(Res, Host, Lang, AJID, Level);
-process_admin(Host, #request{path = [<<"node">>, SNode | NPath],
-			     q = Query, lang = Lang}, AJID) ->
+    make_xhtml(Res, Host, Lang, AJID);
+process_admin(Host,
+	      #request{path = [<<"node">>, SNode | NPath],
+		       auth = {_, _Auth, AJID}, q = Query, lang = Lang}) ->
     case search_running_node(SNode) of
       false ->
-	  make_xhtml([?XCT(<<"h1">>, ?T("Node not found"))], Host,
-		     Lang, AJID, 2);
+	  make_xhtml([?XCT(<<"h1">>, <<"Node not found">>)], Host,
+		     Lang, AJID);
       Node ->
 	  Res = get_node(Host, Node, NPath, Query, Lang),
-	  Level = case Host of
-		global -> 2 + length(NPath);
-		_ -> 4 + length(NPath)
-	  end,
-	  make_xhtml(Res, Host, Node, Lang, AJID, Level)
+	  make_xhtml(Res, Host, Node, Lang, AJID)
     end;
 %%%==================================
 %%%% process_admin default case
-process_admin(Host, #request{lang = Lang} = Request, AJID) ->
+process_admin(Host,
+	      #request{lang = Lang, auth = {_, _Auth, AJID}} =
+		  Request) ->
     Res = case Host of
 	      global ->
 		  ejabberd_hooks:run_fold(
@@ -558,28 +788,295 @@ process_admin(Host, #request{lang = Lang} = Request, AJID) ->
 		  ejabberd_hooks:run_fold(
 		    webadmin_page_host, Host, [], [Host, Request])
 	  end,
-    Level = case Host of
-	global -> length(Request#request.path);
-	_ -> 2 + length(Request#request.path)
-    end,
     case Res of
       [] ->
 	  setelement(1,
 		     make_xhtml([?XC(<<"h1">>, <<"Not Found">>)], Host, Lang,
-				AJID, Level),
+				AJID),
 		     404);
-      _ -> make_xhtml(Res, Host, Lang, AJID, Level)
+      _ -> make_xhtml(Res, Host, Lang, AJID)
     end.
 
+%%%==================================
+%%%% acl
+
+acls_to_xhtml(ACLs) ->
+    ?XAE(<<"table">>, [],
+	 [?XE(<<"tbody">>,
+	      (lists:map(fun ({acl, Name, Spec} = ACL) ->
+				 SName = iolist_to_binary(atom_to_list(Name)),
+				 ID = term_to_id(ACL),
+				 ?XE(<<"tr">>,
+				     ([?XE(<<"td">>,
+					   [?INPUT(<<"checkbox">>,
+						   <<"selected">>, ID)]),
+				       ?XC(<<"td">>, SName)]
+					++ acl_spec_to_xhtml(ID, Spec)))
+			 end,
+			 ACLs)
+		 ++
+		 [?XE(<<"tr">>,
+		      ([?X(<<"td">>),
+			?XE(<<"td">>,
+			    [?INPUT(<<"text">>, <<"namenew">>, <<"">>)])]
+			 ++ acl_spec_to_xhtml(<<"new">>, {user, <<"">>})))]))]).
+
+acl_spec_to_text({user, {U, S}}) ->
+    {user, <<U/binary, "@", S/binary>>};
+acl_spec_to_text({user, U}) -> {user, U};
+acl_spec_to_text({server, S}) -> {server, S};
+acl_spec_to_text({user_regexp, {RU, S}}) ->
+    {user_regexp, <<RU/binary, "@", S/binary>>};
+acl_spec_to_text({user_regexp, RU}) ->
+    {user_regexp, RU};
+acl_spec_to_text({server_regexp, RS}) ->
+    {server_regexp, RS};
+acl_spec_to_text({node_regexp, {RU, RS}}) ->
+    {node_regexp, <<RU/binary, "@", RS/binary>>};
+acl_spec_to_text({user_glob, {RU, S}}) ->
+    {user_glob, <<RU/binary, "@", S/binary>>};
+acl_spec_to_text({user_glob, RU}) -> {user_glob, RU};
+acl_spec_to_text({server_glob, RS}) ->
+    {server_glob, RS};
+acl_spec_to_text({node_glob, {RU, RS}}) ->
+    {node_glob, <<RU/binary, "@", RS/binary>>};
+acl_spec_to_text(all) -> {all, <<"">>};
+acl_spec_to_text({ip, {IP, L}}) -> {ip, <<(misc:ip_to_list(IP))/binary, "/",
+					  (integer_to_binary(L))/binary>>};
+acl_spec_to_text(Spec) -> {raw, term_to_string(Spec)}.
+
+acl_spec_to_xhtml(ID, Spec) ->
+    {Type, Str} = acl_spec_to_text(Spec),
+    [acl_spec_select(ID, Type), ?ACLINPUT(Str)].
+
+acl_spec_select(ID, Opt) ->
+    ?XE(<<"td">>,
+	[?XAE(<<"select">>,
+	      [{<<"name">>, <<"type", ID/binary>>}],
+	      (lists:map(fun (O) ->
+				 Sel = if O == Opt ->
+					      [{<<"selected">>,
+						<<"selected">>}];
+					  true -> []
+				       end,
+				 ?XAC(<<"option">>,
+				      (Sel ++
+					 [{<<"value">>,
+					   iolist_to_binary(atom_to_list(O))}]),
+				      (iolist_to_binary(atom_to_list(O))))
+			 end,
+			 [user, server, user_regexp, server_regexp, node_regexp,
+			  user_glob, server_glob, node_glob, all, ip, raw])))]).
+
+%% @spec (T::any()) -> StringLine::string()
+term_to_string(T) ->
+    StringParagraph =
+	(str:format("~1000000p", [T])),
+    ejabberd_regexp:greplace(StringParagraph, <<"\\n ">>,
+			     <<"">>).
+
+%% @spec (T::any(), Cols::integer()) -> {NumLines::integer(), Paragraph::string()}
+term_to_paragraph(T, Cols) ->
+    Paragraph = iolist_to_binary(io_lib:print(T, 1, Cols, -1)),
+    FieldList = ejabberd_regexp:split(Paragraph, <<"\n">>),
+    NumLines = length(FieldList),
+    {NumLines, Paragraph}.
+
 term_to_id(T) -> base64:encode((term_to_binary(T))).
+
+acl_parse_query(Host, Query) ->
+    ACLs = mnesia:dirty_select(acl,
+		      [{{acl, {'$1', Host}, '$2'}, [],
+			[{{acl, '$1', '$2'}}]}]),
+    case lists:keysearch(<<"submit">>, 1, Query) of
+      {value, _} -> acl_parse_submit(ACLs, Query);
+      _ ->
+	  case lists:keysearch(<<"delete">>, 1, Query) of
+	    {value, _} -> acl_parse_delete(ACLs, Query)
+	  end
+    end.
+
+acl_parse_submit(ACLs, Query) ->
+    NewACLs = lists:map(fun ({acl, Name, Spec} = ACL) ->
+				ID = term_to_id(ACL),
+				case {lists:keysearch(<<"type", ID/binary>>, 1,
+						      Query),
+				      lists:keysearch(<<"value", ID/binary>>, 1,
+						      Query)}
+				    of
+				  {{value, {_, T}}, {value, {_, V}}} ->
+				      {Type, Str} = acl_spec_to_text(Spec),
+				      case
+					{iolist_to_binary(atom_to_list(Type)),
+					 Str}
+					  of
+					{T, V} -> ACL;
+					_ ->
+					    NewSpec = string_to_spec(T, V),
+					    {acl, Name, NewSpec}
+				      end;
+				  _ -> ACL
+				end
+			end,
+			ACLs),
+    NewACL = case {lists:keysearch(<<"namenew">>, 1, Query),
+		   lists:keysearch(<<"typenew">>, 1, Query),
+		   lists:keysearch(<<"valuenew">>, 1, Query)}
+		 of
+	       {{value, {_, <<"">>}}, _, _} -> [];
+	       {{value, {_, N}}, {value, {_, T}}, {value, {_, V}}} ->
+		   NewName = misc:binary_to_atom(N),
+		   NewSpec = string_to_spec(T, V),
+		   [{acl, NewName, NewSpec}];
+	       _ -> []
+	     end,
+    NewACLs ++ NewACL.
+
+string_to_spec(<<"user">>, Val) ->
+    string_to_spec2(user, Val);
+string_to_spec(<<"server">>, Val) -> {server, Val};
+string_to_spec(<<"user_regexp">>, Val) ->
+    string_to_spec2(user_regexp, Val);
+string_to_spec(<<"server_regexp">>, Val) ->
+    {server_regexp, Val};
+string_to_spec(<<"node_regexp">>, Val) ->
+    #jid{luser = U, lserver = S, resource = <<"">>} =
+	jid:decode(Val),
+    {node_regexp, U, S};
+string_to_spec(<<"user_glob">>, Val) ->
+    string_to_spec2(user_glob, Val);
+string_to_spec(<<"server_glob">>, Val) ->
+    {server_glob, Val};
+string_to_spec(<<"node_glob">>, Val) ->
+    #jid{luser = U, lserver = S, resource = <<"">>} =
+	jid:decode(Val),
+    {node_glob, U, S};
+string_to_spec(<<"ip">>, Val) ->
+    [IPs, Ms] = str:tokens(Val, <<"/">>),
+    {ok, IP} = inet_parse:address(binary_to_list(IPs)),
+    {ip, {IP, binary_to_integer(Ms)}};
+string_to_spec(<<"all">>, _) -> all;
+string_to_spec(<<"raw">>, Val) ->
+    {ok, Tokens, _} = erl_scan:string(binary_to_list(<<Val/binary, ".">>)),
+    {ok, NewSpec} = erl_parse:parse_term(Tokens),
+    NewSpec.
+
+string_to_spec2(ACLName, Val) ->
+    #jid{luser = U, lserver = S, resource = <<"">>} =
+	jid:decode(Val),
+    case U of
+      <<"">> -> {ACLName, S};
+      _ -> {ACLName, {U, S}}
+    end.
+
+acl_parse_delete(ACLs, Query) ->
+    NewACLs = lists:filter(fun ({acl, _Name, _Spec} =
+				    ACL) ->
+				   ID = term_to_id(ACL),
+				   not lists:member({<<"selected">>, ID}, Query)
+			   end,
+			   ACLs),
+    NewACLs.
+
+access_rules_to_xhtml(AccessRules, Lang) ->
+    ?XAE(<<"table">>, [],
+	 [?XE(<<"tbody">>,
+	      (lists:map(fun ({access, Name, Rules} = Access) ->
+				 SName = iolist_to_binary(atom_to_list(Name)),
+				 ID = term_to_id(Access),
+				 ?XE(<<"tr">>,
+				     [?XE(<<"td">>,
+					  [?INPUT(<<"checkbox">>,
+						  <<"selected">>, ID)]),
+				      ?XE(<<"td">>,
+					  [?AC(<<SName/binary, "/">>, SName)]),
+				      ?XC(<<"td">>, (term_to_string(Rules)))])
+			 end,
+			 lists:keysort(2,AccessRules))
+		 ++
+		 [?XE(<<"tr">>,
+		      [?X(<<"td">>),
+		       ?XE(<<"td">>,
+			   [?INPUT(<<"text">>, <<"namenew">>, <<"">>)]),
+		       ?XE(<<"td">>,
+			   [?INPUTT(<<"submit">>, <<"addnew">>,
+				    <<"Add New">>)])])]))]).
+
+access_parse_query(Host, Query) ->
+    AccessRules = mnesia:dirty_select(access,
+			     [{{access, {'$1', Host}, '$2'}, [],
+			       [{{access, '$1', '$2'}}]}]),
+    case lists:keysearch(<<"addnew">>, 1, Query) of
+      {value, _} ->
+	  access_parse_addnew(AccessRules, Host, Query);
+      _ ->
+	  case lists:keysearch(<<"delete">>, 1, Query) of
+	    {value, _} ->
+		access_parse_delete(AccessRules, Host, Query)
+	  end
+    end.
+
+access_parse_addnew(_AccessRules, Host, Query) ->
+    case lists:keysearch(<<"namenew">>, 1, Query) of
+      {value, {_, String}} when String /= <<"">> ->
+	  Name = misc:binary_to_atom(String),
+	  ejabberd_config:add_option({access, Name, Host},
+					    []),
+	  ok
+    end.
+
+access_parse_delete(AccessRules, Host, Query) ->
+    lists:foreach(fun ({access, Name, _Rules} =
+			   AccessRule) ->
+			  ID = term_to_id(AccessRule),
+			  case lists:member({<<"selected">>, ID}, Query) of
+			    true ->
+				mnesia:transaction(fun () ->
+							   mnesia:delete({access,
+									  {Name,
+									   Host}})
+						   end);
+			    _ -> ok
+			  end
+		  end,
+		  AccessRules),
+    ok.
+
+access_rule_to_xhtml(Rules) ->
+    Text = lists:flatmap(fun ({Access, ACL} = _Rule) ->
+				 SAccess = element_to_list(Access),
+				 SACL = atom_to_list(ACL),
+				 [SAccess, " \t", SACL, "\n"]
+			 end,
+			 Rules),
+    ?XAC(<<"textarea">>,
+	 [{<<"name">>, <<"rules">>}, {<<"rows">>, <<"16">>},
+	  {<<"cols">>, <<"80">>}],
+	 list_to_binary(Text)).
+
+parse_access_rule(Text) ->
+    Strings = str:tokens(Text, <<"\r\n">>),
+    case catch lists:flatmap(fun (String) ->
+				     case str:tokens(String, <<" \t">>) of
+				       [Access, ACL] ->
+					   [{list_to_element(Access),
+					     misc:binary_to_atom(ACL)}];
+				       [] -> []
+				     end
+			     end,
+			     Strings)
+	of
+      {'EXIT', _Reason} -> error;
+      Rs -> {ok, Rs}
+    end.
 
 %%%==================================
 %%%% list_vhosts
 
 list_vhosts(Lang, JID) ->
-    Hosts = ejabberd_option:hosts(),
+    Hosts = (?MYHOSTS),
     HostsAllowed = lists:filter(fun (Host) ->
-					any_rules_allowed(Host,
+					acl:any_rules_allowed(Host,
 						     [configure, webadmin_view],
 						     JID)
 				end,
@@ -591,9 +1088,9 @@ list_vhosts2(Lang, Hosts) ->
     [?XE(<<"table">>,
 	 [?XE(<<"thead">>,
 	      [?XE(<<"tr">>,
-		   [?XCT(<<"td">>, ?T("Host")),
-		    ?XCT(<<"td">>, ?T("Registered Users")),
-		    ?XCT(<<"td">>, ?T("Online Users"))])]),
+		   [?XCT(<<"td">>, <<"Host">>),
+		    ?XCT(<<"td">>, <<"Registered Users">>),
+		    ?XCT(<<"td">>, <<"Online Users">>)])]),
 	  ?XE(<<"tbody">>,
 	      (lists:map(fun (Host) ->
 				 OnlineUsers =
@@ -647,8 +1144,8 @@ list_users(Host, Query, Lang, URLFunc) ->
 	     end,
     case Res of
 %% Parse user creation query and try register:
-      ok -> [?XREST(?T("Submitted"))];
-      error -> [?XREST(?T("Bad format"))];
+      ok -> [?XREST(<<"Submitted">>)];
+      error -> [?XREST(<<"Bad format">>)];
       nothing -> []
     end
       ++
@@ -656,12 +1153,12 @@ list_users(Host, Query, Lang, URLFunc) ->
 	    [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
 	    ([?XE(<<"table">>,
 		  [?XE(<<"tr">>,
-		       [?XC(<<"td">>, <<(translate:translate(Lang, ?T("User")))/binary, ":">>),
+		       [?XC(<<"td">>, <<(?T(<<"User">>))/binary, ":">>),
 			?XE(<<"td">>,
 			    [?INPUT(<<"text">>, <<"newusername">>, <<"">>)]),
 			?XE(<<"td">>, [?C(<<" @ ", Host/binary>>)])]),
 		   ?XE(<<"tr">>,
-		       [?XC(<<"td">>, <<(translate:translate(Lang, ?T("Password")))/binary, ":">>),
+		       [?XC(<<"td">>, <<(?T(<<"Password">>))/binary, ":">>),
 			?XE(<<"td">>,
 			    [?INPUT(<<"password">>, <<"newuserpassword">>,
 				    <<"">>)]),
@@ -670,7 +1167,7 @@ list_users(Host, Query, Lang, URLFunc) ->
 		       [?X(<<"td">>),
 			?XAE(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			     [?INPUTT(<<"submit">>, <<"addnewuser">>,
-				      ?T("Add User"))]),
+				      <<"Add User">>)]),
 			?X(<<"td">>)])]),
 	      ?P]
 	       ++ FUsers))].
@@ -712,9 +1209,9 @@ list_given_users(Host, Users, Prefix, Lang, URLFunc) ->
     ?XE(<<"table">>,
 	[?XE(<<"thead">>,
 	     [?XE(<<"tr">>,
-		  [?XCT(<<"td">>, ?T("User")),
-		   ?XCT(<<"td">>, ?T("Offline Messages")),
-		   ?XCT(<<"td">>, ?T("Last Activity"))])]),
+		  [?XCT(<<"td">>, <<"User">>),
+		   ?XCT(<<"td">>, <<"Offline Messages">>),
+		   ?XCT(<<"td">>, <<"Last Activity">>)])]),
 	 ?XE(<<"tbody">>,
 	     (lists:map(fun (_SU = {Server, User}) ->
 				US = {User, Server},
@@ -729,8 +1226,10 @@ list_given_users(Host, Users, Prefix, Lang, URLFunc) ->
 									 Server)
 					    of
 					  [] ->
-					      case get_last_info(User, Server) of
-						not_found -> translate:translate(Lang, ?T("Never"));
+					      case mod_last:get_last_info(User,
+									  Server)
+						  of
+						not_found -> ?T(<<"Never">>);
 						{ok, Shift, _Status} ->
 						    TimeStamp = {Shift div
 								   1000000,
@@ -748,12 +1247,12 @@ list_given_users(Host, Users, Prefix, Lang, URLFunc) ->
 										    Minute,
 										    Second]))
 					      end;
-					  _ -> translate:translate(Lang, ?T("Online"))
+					  _ -> ?T(<<"Online">>)
 					end,
 				?XE(<<"tr">>,
 				    [?XE(<<"td">>,
 					 [?AC((URLFunc({user, Prefix,
-							misc:url_encode(User),
+							ejabberd_http:url_encode(User),
 							Server})),
 					      (us_to_list(US)))]),
 				     ?XE(<<"td">>, FQueueLen),
@@ -775,22 +1274,9 @@ get_offlinemsg_module(Server) ->
     end.
 
 get_lastactivity_menuitem_list(Server) ->
-    case gen_mod:is_loaded(Server, mod_last) of
-	true ->
-	    case mod_last_opt:db_type(Server) of
-		mnesia -> [{<<"last-activity">>, ?T("Last Activity")}];
-		_ -> []
-	    end;
-	false ->
-	    []
-    end.
-
-get_last_info(User, Server) ->
-    case gen_mod:is_loaded(Server, mod_last) of
-	true ->
-	    mod_last:get_last_info(User, Server);
-	false ->
-	    not_found
+    case gen_mod:db_type(Server, mod_last) of
+      mnesia -> [{<<"last-activity">>, <<"Last Activity">>}];
+      _ -> []
     end.
 
 us_to_list({User, Server}) ->
@@ -808,22 +1294,22 @@ get_stats(global, Lang) ->
 					  ejabberd_auth:count_users(Host)
 					    + Total
 				  end,
-				  0, ejabberd_option:hosts()),
+				  0, ?MYHOSTS),
     OutS2SNumber = ejabberd_s2s:outgoing_s2s_number(),
     InS2SNumber = ejabberd_s2s:incoming_s2s_number(),
     [?XAE(<<"table">>, [],
 	  [?XE(<<"tbody">>,
 	       [?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Registered Users:")),
+		    [?XCT(<<"td">>, <<"Registered Users:">>),
 		     ?XC(<<"td">>, (pretty_string_int(RegisteredUsers)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Online Users:")),
+		    [?XCT(<<"td">>, <<"Online Users:">>),
 		     ?XC(<<"td">>, (pretty_string_int(OnlineUsers)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Outgoing s2s Connections:")),
+		    [?XCT(<<"td">>, <<"Outgoing s2s Connections:">>),
 		     ?XC(<<"td">>, (pretty_string_int(OutS2SNumber)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Incoming s2s Connections:")),
+		    [?XCT(<<"td">>, <<"Incoming s2s Connections:">>),
 		     ?XC(<<"td">>, (pretty_string_int(InS2SNumber)))])])])];
 get_stats(Host, Lang) ->
     OnlineUsers =
@@ -833,10 +1319,10 @@ get_stats(Host, Lang) ->
     [?XAE(<<"table">>, [],
 	  [?XE(<<"tbody">>,
 	       [?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Registered Users:")),
+		    [?XCT(<<"td">>, <<"Registered Users:">>),
 		     ?XC(<<"td">>, (pretty_string_int(RegisteredUsers)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Online Users:")),
+		    [?XCT(<<"td">>, <<"Online Users:">>),
 		     ?XC(<<"td">>, (pretty_string_int(OnlineUsers)))])])])].
 
 list_online_users(Host, _Lang) ->
@@ -845,7 +1331,7 @@ list_online_users(Host, _Lang) ->
     SUsers = lists:usort(Users),
     lists:flatmap(fun ({_S, U} = SU) ->
 			  [?AC(<<"../user/",
-				 (misc:url_encode(U))/binary, "/">>,
+				 (ejabberd_http:url_encode(U))/binary, "/">>,
 			       (su_to_list(SU))),
 			   ?BR]
 		  end,
@@ -859,7 +1345,7 @@ user_info(User, Server, Query, Lang) ->
 					       Server),
     FResources =
         case Resources of
-            [] -> [?CT(?T("None"))];
+            [] -> [?CT(<<"None">>)];
             _ ->
                 [?XE(<<"ul">>,
                      (lists:map(
@@ -916,15 +1402,15 @@ user_info(User, Server, Query, Lang) ->
     FPassword = [?INPUT(<<"text">>, <<"password">>, <<"">>),
 		 ?C(<<" ">>),
 		 ?INPUTT(<<"submit">>, <<"chpassword">>,
-			 ?T("Change Password"))],
+			 <<"Change Password">>)],
     UserItems = ejabberd_hooks:run_fold(webadmin_user,
 					LServer, [], [User, Server, Lang]),
     LastActivity = case ejabberd_sm:get_user_resources(User,
 						       Server)
 		       of
 		     [] ->
-			 case get_last_info(User, Server) of
-			   not_found -> translate:translate(Lang, ?T("Never"));
+			 case mod_last:get_last_info(User, Server) of
+			   not_found -> ?T(<<"Never">>);
 			   {ok, Shift, _Status} ->
 			       TimeStamp = {Shift div 1000000,
 					    Shift rem 1000000, 0},
@@ -935,29 +1421,29 @@ user_info(User, Server, Query, Lang) ->
 							       Hour, Minute,
 							       Second]))
 			 end;
-		     _ -> translate:translate(Lang, ?T("Online"))
+		     _ -> ?T(<<"Online">>)
 		   end,
-    [?XC(<<"h1">>, (str:format(translate:translate(Lang, ?T("User ~ts")),
+    [?XC(<<"h1">>, (str:format(?T(<<"User ~s">>),
                                                 [us_to_list(US)])))]
       ++
       case Res of
-	ok -> [?XREST(?T("Submitted"))];
-	error -> [?XREST(?T("Bad format"))];
+	ok -> [?XREST(<<"Submitted">>)];
+	error -> [?XREST(<<"Bad format">>)];
 	nothing -> []
       end
 	++
 	[?XAE(<<"form">>,
 	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
-	      ([?XCT(<<"h3">>, ?T("Connected Resources:"))] ++
+	      ([?XCT(<<"h3">>, <<"Connected Resources:">>)] ++
 		 FResources ++
-		   [?XCT(<<"h3">>, ?T("Password:"))] ++
+		   [?XCT(<<"h3">>, <<"Password:">>)] ++
 		     FPassword ++
-		       [?XCT(<<"h3">>, ?T("Last Activity"))] ++
+		       [?XCT(<<"h3">>, <<"Last Activity">>)] ++
 			 [?C(LastActivity)] ++
 			   UserItems ++
 			     [?P,
 			      ?INPUTT(<<"submit">>, <<"removeuser">>,
-				      ?T("Remove User"))]))].
+				      <<"Remove User">>)]))].
 
 user_parse_query(User, Server, Query) ->
     lists:foldl(fun ({Action, _Value}, Acc)
@@ -989,7 +1475,7 @@ user_parse_query1(Action, User, Server, Query) ->
     end.
 
 list_last_activity(Host, Lang, Integral, Period) ->
-    TimeStamp = erlang:system_time(second),
+    TimeStamp = p1_time_compat:system_time(seconds),
     case Period of
       <<"all">> -> TS = 0, Days = infinity;
       <<"year">> -> TS = TimeStamp - 366 * 86400, Days = 366;
@@ -1004,7 +1490,7 @@ list_last_activity(Host, Lang, Integral, Period) ->
       {'EXIT', _Reason} -> [];
       Vals ->
 	  Hist = histogram(Vals, Integral),
-	  if Hist == [] -> [?CT(?T("No Data"))];
+	  if Hist == [] -> [?CT(<<"No Data">>)];
 	     true ->
 		 Left = if Days == infinity -> 0;
 			   true -> Days - length(Hist)
@@ -1055,7 +1541,7 @@ get_nodes(Lang) ->
     RunningNodes = ejabberd_cluster:get_nodes(),
     StoppedNodes = ejabberd_cluster:get_known_nodes()
 		     -- RunningNodes,
-    FRN = if RunningNodes == [] -> ?CT(?T("None"));
+    FRN = if RunningNodes == [] -> ?CT(<<"None">>);
 	     true ->
 		 ?XE(<<"ul">>,
 		     (lists:map(fun (N) ->
@@ -1065,7 +1551,7 @@ get_nodes(Lang) ->
 				end,
 				lists:sort(RunningNodes))))
 	  end,
-    FSN = if StoppedNodes == [] -> ?CT(?T("None"));
+    FSN = if StoppedNodes == [] -> ?CT(<<"None">>);
 	     true ->
 		 ?XE(<<"ul">>,
 		     (lists:map(fun (N) ->
@@ -1074,9 +1560,9 @@ get_nodes(Lang) ->
 				end,
 				lists:sort(StoppedNodes))))
 	  end,
-    [?XCT(<<"h1">>, ?T("Nodes")),
-     ?XCT(<<"h3">>, ?T("Running Nodes")), FRN,
-     ?XCT(<<"h3">>, ?T("Stopped Nodes")), FSN].
+    [?XCT(<<"h1">>, <<"Nodes">>),
+     ?XCT(<<"h3">>, <<"Running Nodes">>), FRN,
+     ?XCT(<<"h3">>, <<"Stopped Nodes">>), FSN].
 
 search_running_node(SNode) ->
     RunningNodes = ejabberd_cluster:get_nodes(),
@@ -1091,41 +1577,47 @@ search_running_node(SNode, [Node | Nodes]) ->
 
 get_node(global, Node, [], Query, Lang) ->
     Res = node_parse_query(Node, Query),
-    Base = get_base_path(global, Node, 2),
+    Base = get_base_path(global, Node),
     MenuItems2 = make_menu_items(global, Node, Base, Lang),
     [?XC(<<"h1">>,
-	 (str:format(translate:translate(Lang, ?T("Node ~p")), [Node])))]
+	 (str:format(?T(<<"Node ~p">>), [Node])))]
       ++
       case Res of
-	ok -> [?XREST(?T("Submitted"))];
-	error -> [?XREST(?T("Bad format"))];
+	ok -> [?XREST(<<"Submitted">>)];
+	error -> [?XREST(<<"Bad format">>)];
 	nothing -> []
       end
 	++
 	[?XE(<<"ul">>,
-	     ([?LI([?ACT(<<"db/">>, ?T("Database"))]),
-	       ?LI([?ACT(<<"backup/">>, ?T("Backup"))]),
-	       ?LI([?ACT(<<"stats/">>, ?T("Statistics"))]),
-	       ?LI([?ACT(<<"update/">>, ?T("Update"))])]
+	     ([?LI([?ACT(<<Base/binary, "db/">>, <<"Database">>)]),
+	       ?LI([?ACT(<<Base/binary, "backup/">>, <<"Backup">>)]),
+	       ?LI([?ACT(<<Base/binary, "ports/">>,
+			 <<"Listened Ports">>)]),
+	       ?LI([?ACT(<<Base/binary, "stats/">>,
+			 <<"Statistics">>)]),
+	       ?LI([?ACT(<<Base/binary, "update/">>, <<"Update">>)])]
 		++ MenuItems2)),
 	 ?XAE(<<"form">>,
 	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
-	      [?INPUTT(<<"submit">>, <<"restart">>, ?T("Restart")),
+	      [?INPUTT(<<"submit">>, <<"restart">>, <<"Restart">>),
 	       ?C(<<" ">>),
-	       ?INPUTT(<<"submit">>, <<"stop">>, ?T("Stop"))])];
+	       ?INPUTT(<<"submit">>, <<"stop">>, <<"Stop">>)])];
 get_node(Host, Node, [], _Query, Lang) ->
-    Base = get_base_path(Host, Node, 4),
+    Base = get_base_path(Host, Node),
     MenuItems2 = make_menu_items(Host, Node, Base, Lang),
-    [?XC(<<"h1">>, (str:format(translate:translate(Lang, ?T("Node ~p")), [Node]))),
-     ?XE(<<"ul">>, MenuItems2)];
+    [?XC(<<"h1">>, (str:format(?T(<<"Node ~p">>), [Node]))),
+     ?XE(<<"ul">>,
+	 ([?LI([?ACT(<<Base/binary, "modules/">>,
+		     <<"Modules">>)])]
+	    ++ MenuItems2))];
 get_node(global, Node, [<<"db">>], Query, Lang) ->
     case ejabberd_cluster:call(Node, mnesia, system_info, [tables]) of
       {badrpc, _Reason} ->
-	  [?XCT(<<"h1">>, ?T("RPC Call Error"))];
+	  [?XCT(<<"h1">>, <<"RPC Call Error">>)];
       Tables ->
 	  ResS = case node_db_parse_query(Node, Tables, Query) of
 		   nothing -> [];
-		   ok -> [?XREST(?T("Submitted"))]
+		   ok -> [?XREST(<<"Submitted">>)]
 		 end,
 	  STables = lists:sort(Tables),
 	  Rows = lists:map(fun (Table) ->
@@ -1172,7 +1664,7 @@ get_node(global, Node, [<<"db">>], Query, Lang) ->
 			   end,
 			   STables),
 	  [?XC(<<"h1">>,
-	       (str:format(translate:translate(Lang, ?T("Database Tables at ~p")),
+	       (str:format(?T(<<"Database Tables at ~p">>),
                                             [Node]))
 	  )]
 	    ++
@@ -1182,10 +1674,10 @@ get_node(global, Node, [<<"db">>], Query, Lang) ->
 		    [?XAE(<<"table">>, [],
 			  [?XE(<<"thead">>,
 			       [?XE(<<"tr">>,
-				    [?XCT(<<"td">>, ?T("Name")),
-				     ?XCT(<<"td">>, ?T("Storage Type")),
-				     ?XCT(<<"td">>, ?T("Elements")),
-				     ?XCT(<<"td">>, ?T("Memory"))])]),
+				    [?XCT(<<"td">>, <<"Name">>),
+				     ?XCT(<<"td">>, <<"Storage Type">>),
+				     ?XCT(<<"td">>, <<"Elements">>),
+				     ?XCT(<<"td">>, <<"Memory">>)])]),
 			   ?XE(<<"tbody">>,
 			       (Rows ++
 				  [?XE(<<"tr">>,
@@ -1194,7 +1686,7 @@ get_node(global, Node, [<<"db">>], Query, Lang) ->
 					      {<<"class">>, <<"alignright">>}],
 					     [?INPUTT(<<"submit">>,
 						      <<"submit">>,
-						      ?T("Submit"))])])]))])])]
+						      <<"Submit">>)])])]))])])]
     end;
 get_node(global, Node, [<<"backup">>], Query, Lang) ->
     HomeDirRaw = case {os:getenv("HOME"), os:type()} of
@@ -1205,77 +1697,77 @@ get_node(global, Node, [<<"backup">>], Query, Lang) ->
     HomeDir = filename:nativename(HomeDirRaw),
     ResS = case node_backup_parse_query(Node, Query) of
 	     nothing -> [];
-	     ok -> [?XREST(?T("Submitted"))];
+	     ok -> [?XREST(<<"Submitted">>)];
 	     {error, Error} ->
-		 [?XRES(<<(translate:translate(Lang, ?T("Error")))/binary, ": ",
+		 [?XRES(<<(?T(<<"Error">>))/binary, ": ",
 			  ((str:format("~p", [Error])))/binary>>)]
 	   end,
-    [?XC(<<"h1">>, (str:format(translate:translate(Lang, ?T("Backup of ~p")), [Node])))]
+    [?XC(<<"h1">>, (str:format(?T(<<"Backup of ~p">>), [Node])))]
       ++
       ResS ++
 	[?XCT(<<"p">>,
-	      ?T("Please note that these options will "
-		 "only backup the builtin Mnesia database. "
-		 "If you are using the ODBC module, you "
-		 "also need to backup your SQL database "
-		 "separately.")),
+	      <<"Please note that these options will "
+		"only backup the builtin Mnesia database. "
+		"If you are using the ODBC module, you "
+		"also need to backup your SQL database "
+		"separately.">>),
 	 ?XAE(<<"form">>,
 	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
 	      [?XAE(<<"table">>, [],
 		    [?XE(<<"tbody">>,
 			 [?XE(<<"tr">>,
-			      [?XCT(<<"td">>, ?T("Store binary backup:")),
+			      [?XCT(<<"td">>, <<"Store binary backup:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"storepath">>,
 					   (filename:join(HomeDir,
 							  "ejabberd.backup")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"store">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Restore binary backup immediately:")),
+				    <<"Restore binary backup immediately:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"restorepath">>,
 					   (filename:join(HomeDir,
 							  "ejabberd.backup")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"restore">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Restore binary backup after next ejabberd "
-				       "restart (requires less memory):")),
+				    <<"Restore binary backup after next ejabberd "
+				      "restart (requires less memory):">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"fallbackpath">>,
 					   (filename:join(HomeDir,
 							  "ejabberd.backup")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"fallback">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
-			      [?XCT(<<"td">>, ?T("Store plain text backup:")),
+			      [?XCT(<<"td">>, <<"Store plain text backup:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"dumppath">>,
 					   (filename:join(HomeDir,
 							  "ejabberd.dump")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"dump">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Restore plain text backup immediately:")),
+				    <<"Restore plain text backup immediately:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"loadpath">>,
 					   (filename:join(HomeDir,
 							  "ejabberd.dump")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"load">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Import users data from a PIEFXIS file "
-				       "(XEP-0227):")),
+				    <<"Import users data from a PIEFXIS file "
+				      "(XEP-0227):">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>,
 					   <<"import_piefxis_filepath">>,
@@ -1284,11 +1776,11 @@ get_node(global, Node, [<<"backup">>], Query, Lang) ->
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>,
 					    <<"import_piefxis_file">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Export data of all users in the server "
-				       "to PIEFXIS files (XEP-0227):")),
+				    <<"Export data of all users in the server "
+				      "to PIEFXIS files (XEP-0227):">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>,
 					   <<"export_piefxis_dirpath">>,
@@ -1296,13 +1788,15 @@ get_node(global, Node, [<<"backup">>], Query, Lang) ->
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>,
 					    <<"export_piefxis_dir">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XE(<<"td">>,
-				   [?CT(?T("Export data of users in a host to PIEFXIS "
-					   "files (XEP-0227):")),
+				   [?CT(<<"Export data of users in a host to PIEFXIS "
+					  "files (XEP-0227):">>),
 				    ?C(<<" ">>),
-				    make_select_host(Lang, <<"export_piefxis_host_dirhost">>)]),
+				    ?INPUT(<<"text">>,
+					   <<"export_piefxis_host_dirhost">>,
+					   (?MYNAME))]),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>,
 					   <<"export_piefxis_host_dirpath">>,
@@ -1310,13 +1804,15 @@ get_node(global, Node, [<<"backup">>], Query, Lang) ->
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>,
 					    <<"export_piefxis_host_dir">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
                           ?XE(<<"tr">>,
                               [?XE(<<"td">>,
-                                   [?CT(?T("Export all tables as SQL queries "
-					   "to a file:")),
+                                   [?CT(<<"Export all tables as SQL queries "
+                                          "to a file:">>),
                                     ?C(<<" ">>),
-                                    make_select_host(Lang, <<"export_sql_filehost">>)]),
+                                    ?INPUT(<<"text">>,
+                                           <<"export_sql_filehost">>,
+                                           (?MYNAME))]),
                                ?XE(<<"td">>,
 				   [?INPUT(<<"text">>,
                                            <<"export_sql_filepath">>,
@@ -1324,28 +1820,90 @@ get_node(global, Node, [<<"backup">>], Query, Lang) ->
 							  "db.sql")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"export_sql_file">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Import user data from jabberd14 spool "
-				       "file:")),
+				    <<"Import user data from jabberd14 spool "
+				      "file:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"import_filepath">>,
 					   (filename:join(HomeDir,
 							  "user1.xml")))]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"import_file">>,
-					    ?T("OK"))])]),
+					    <<"OK">>)])]),
 			  ?XE(<<"tr">>,
 			      [?XCT(<<"td">>,
-				    ?T("Import users data from jabberd14 spool "
-				       "directory:")),
+				    <<"Import users data from jabberd14 spool "
+				      "directory:">>),
 			       ?XE(<<"td">>,
 				   [?INPUT(<<"text">>, <<"import_dirpath">>,
 					   <<"/var/spool/jabber/">>)]),
 			       ?XE(<<"td">>,
 				   [?INPUTT(<<"submit">>, <<"import_dir">>,
-					    ?T("OK"))])])])])])];
+					    <<"OK">>)])])])])])];
+get_node(global, Node, [<<"ports">>], Query, Lang) ->
+    Ports = ejabberd_cluster:call(Node, ejabberd_config,
+		     get_local_option, [listen,
+                                        {ejabberd_listener, validate_cfg},
+                                        []]),
+    Res = case catch node_ports_parse_query(Node, Ports,
+					    Query)
+	      of
+	    submitted -> ok;
+	    {'EXIT', _Reason} -> error;
+	    {is_added, ok} -> ok;
+	    {is_added, {error, Reason}} ->
+		{error, (str:format("~p", [Reason]))};
+	    _ -> nothing
+	  end,
+    NewPorts = lists:sort(ejabberd_cluster:call(Node, ejabberd_config,
+				   get_local_option,
+                                   [listen,
+                                    {ejabberd_listener, validate_cfg},
+                                    []])),
+    H1String = <<(?T(<<"Listened Ports at ">>))/binary,
+		 (iolist_to_binary(atom_to_list(Node)))/binary>>,
+    (?H1GL(H1String, <<"listeningports">>, <<"Listening Ports">>))
+      ++
+      case Res of
+	ok -> [?XREST(<<"Submitted">>)];
+	error -> [?XREST(<<"Bad format">>)];
+	{error, ReasonT} ->
+	    [?XRES(<<(?T(<<"Error">>))/binary, ": ",
+		     ReasonT/binary>>)];
+	nothing -> []
+      end
+	++
+	[?XAE(<<"form">>,
+	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
+	      [node_ports_to_xhtml(NewPorts, Lang)])];
+get_node(Host, Node, [<<"modules">>], Query, Lang)
+    when is_binary(Host) ->
+    Modules = ejabberd_cluster:call(Node, gen_mod,
+		       loaded_modules_with_opts, [Host]),
+    Res = case catch node_modules_parse_query(Host, Node,
+					      Modules, Query)
+	      of
+	    submitted -> ok;
+	    {'EXIT', Reason} -> ?INFO_MSG("~p~n", [Reason]), error;
+	    _ -> nothing
+	  end,
+    NewModules = lists:sort(ejabberd_cluster:call(Node, gen_mod,
+				     loaded_modules_with_opts, [Host])),
+    H1String = (str:format(?T(<<"Modules at ~p">>), [Node])),
+    (?H1GL(H1String, <<"modulesoverview">>,
+	   <<"Modules Overview">>))
+      ++
+      case Res of
+	ok -> [?XREST(<<"Submitted">>)];
+	error -> [?XREST(<<"Bad format">>)];
+	nothing -> []
+      end
+	++
+	[?XAE(<<"form">>,
+	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
+	      [node_modules_to_xhtml(NewModules, Lang)])];
 get_node(global, Node, [<<"stats">>], _Query, Lang) ->
     UpTime = ejabberd_cluster:call(Node, erlang, statistics,
 		      [wall_clock]),
@@ -1364,35 +1922,35 @@ get_node(global, Node, [<<"stats">>], _Query, Lang) ->
     TransactionsLogged = ejabberd_cluster:call(Node, mnesia, system_info,
 				  [transaction_log_writes]),
     [?XC(<<"h1">>,
-	 (str:format(translate:translate(Lang, ?T("Statistics of ~p")), [Node]))),
+	 (str:format(?T(<<"Statistics of ~p">>), [Node]))),
      ?XAE(<<"table">>, [],
 	  [?XE(<<"tbody">>,
 	       [?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Uptime:")),
+		    [?XCT(<<"td">>, <<"Uptime:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  UpTimeS)]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("CPU Time:")),
+		    [?XCT(<<"td">>, <<"CPU Time:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  CPUTimeS)]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Online Users:")),
+		    [?XCT(<<"td">>, <<"Online Users:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  (pretty_string_int(OnlineUsers)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Transactions Committed:")),
+		    [?XCT(<<"td">>, <<"Transactions Committed:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  (pretty_string_int(TransactionsCommitted)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Transactions Aborted:")),
+		    [?XCT(<<"td">>, <<"Transactions Aborted:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  (pretty_string_int(TransactionsAborted)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Transactions Restarted:")),
+		    [?XCT(<<"td">>, <<"Transactions Restarted:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  (pretty_string_int(TransactionsRestarted)))]),
 		?XE(<<"tr">>,
-		    [?XCT(<<"td">>, ?T("Transactions Logged:")),
+		    [?XCT(<<"td">>, <<"Transactions Logged:">>),
 		     ?XAC(<<"td">>, [{<<"class">>, <<"alignright">>}],
 			  (pretty_string_int(TransactionsLogged)))])])])];
 get_node(global, Node, [<<"update">>], Query, Lang) ->
@@ -1403,7 +1961,7 @@ get_node(global, Node, [<<"update">>], Query, Lang) ->
      Check} =
 	ejabberd_cluster:call(Node, ejabberd_update, update_info, []),
     Mods = case UpdatedBeams of
-	     [] -> ?CT(?T("None"));
+	     [] -> ?CT(<<"None">>);
 	     _ ->
 		 BeamsLis = lists:map(fun (Beam) ->
 					      BeamString =
@@ -1416,12 +1974,12 @@ get_node(global, Node, [<<"update">>], Query, Lang) ->
 				      UpdatedBeams),
 		 SelectButtons = [?BR,
 				  ?INPUTATTRS(<<"button">>, <<"selectall">>,
-					      ?T("Select All"),
+					      <<"Select All">>,
 					      [{<<"onClick">>,
 						<<"selectAll()">>}]),
 				  ?C(<<" ">>),
 				  ?INPUTATTRS(<<"button">>, <<"unselectall">>,
-					      ?T("Unselect All"),
+					      <<"Unselect All">>,
 					      [{<<"onClick">>,
 						<<"unSelectAll()">>}])],
 		 ?XAE(<<"ul">>, [{<<"class">>, <<"nolistyle">>}],
@@ -1432,10 +1990,10 @@ get_node(global, Node, [<<"update">>], Query, Lang) ->
     FmtLowLevelScript = (?XC(<<"pre">>,
 			     (str:format("~p", [LowLevelScript])))),
     [?XC(<<"h1">>,
-	 (str:format(translate:translate(Lang, ?T("Update ~p")), [Node])))]
+	 (str:format(?T(<<"Update ~p">>), [Node])))]
       ++
       case Res of
-	ok -> [?XREST(?T("Submitted"))];
+	ok -> [?XREST(<<"Submitted">>)];
 	{error, ErrorText} ->
 	    [?XREST(<<"Error: ", ErrorText/binary>>)];
 	nothing -> []
@@ -1443,14 +2001,14 @@ get_node(global, Node, [<<"update">>], Query, Lang) ->
 	++
 	[?XAE(<<"form">>,
 	      [{<<"action">>, <<"">>}, {<<"method">>, <<"post">>}],
-	      [?XCT(<<"h2">>, ?T("Update plan")),
-	       ?XCT(<<"h3">>, ?T("Modified modules")), Mods,
-	       ?XCT(<<"h3">>, ?T("Update script")), FmtScript,
-	       ?XCT(<<"h3">>, ?T("Low level update script")),
-	       FmtLowLevelScript, ?XCT(<<"h3">>, ?T("Script check")),
+	      [?XCT(<<"h2">>, <<"Update plan">>),
+	       ?XCT(<<"h3">>, <<"Modified modules">>), Mods,
+	       ?XCT(<<"h3">>, <<"Update script">>), FmtScript,
+	       ?XCT(<<"h3">>, <<"Low level update script">>),
+	       FmtLowLevelScript, ?XCT(<<"h3">>, <<"Script check">>),
 	       ?XC(<<"pre">>, (misc:atom_to_binary(Check))),
 	       ?BR,
-	       ?INPUTT(<<"submit">>, <<"update">>, ?T("Update"))])];
+	       ?INPUTT(<<"submit">>, <<"update">>, <<"Update">>)])];
 get_node(Host, Node, NPath, Query, Lang) ->
     Res = case Host of
 	      global ->
@@ -1486,15 +2044,6 @@ node_parse_query(Node, Query) ->
 	  end
     end.
 
-make_select_host(Lang, Name) ->
-    ?XAE(<<"select">>,
-	 [{<<"name">>, Name}],
-	 (lists:map(fun (Host) ->
-			    ?XACT(<<"option">>,
-				  ([{<<"value">>, Host}]), Host)
-		    end,
-		    ejabberd_config:get_option(hosts)))).
-
 db_storage_select(ID, Opt, Lang) ->
     ?XAE(<<"select">>,
 	 [{<<"name">>, <<"table", ID/binary>>}],
@@ -1509,12 +2058,12 @@ db_storage_select(ID, Opt, Lang) ->
 				       iolist_to_binary(atom_to_list(O))}]),
 				  Desc)
 		    end,
-		    [{ram_copies, ?T("RAM copy")},
-		     {disc_copies, ?T("RAM and disc copy")},
-		     {disc_only_copies, ?T("Disc only copy")},
-		     {unknown, ?T("Remote copy")},
-		     {delete_content, ?T("Delete content")},
-		     {delete_table, ?T("Delete table")}]))).
+		    [{ram_copies, <<"RAM copy">>},
+		     {disc_copies, <<"RAM and disc copy">>},
+		     {disc_only_copies, <<"Disc only copy">>},
+		     {unknown, <<"Remote copy">>},
+		     {delete_content, <<"Delete content">>},
+		     {delete_table, <<"Delete table">>}]))).
 
 node_db_parse_query(_Node, _Tables, [{nokey, <<>>}]) ->
     nothing;
@@ -1633,6 +2182,248 @@ node_backup_parse_query(Node, Query) ->
 		 <<"import_piefxis_file">>, <<"export_piefxis_dir">>,
 		 <<"export_piefxis_host_dir">>, <<"export_sql_file">>]).
 
+node_ports_to_xhtml(Ports, Lang) ->
+    ?XAE(<<"table">>, [{<<"class">>, <<"withtextareas">>}],
+	 [?XE(<<"thead">>,
+	      [?XE(<<"tr">>,
+		   [?XCT(<<"td">>, <<"Port">>), ?XCT(<<"td">>, <<"IP">>),
+		    ?XCT(<<"td">>, <<"Protocol">>),
+		    ?XCT(<<"td">>, <<"Module">>),
+		    ?XCT(<<"td">>, <<"Options">>)])]),
+	  ?XE(<<"tbody">>,
+	      (lists:map(fun ({PortIP, Module, Opts} = _E) ->
+				 {_Port, SPort, _TIP, SIP, SSPort, NetProt,
+				  OptsClean} =
+				     get_port_data(PortIP, Opts),
+				 SModule =
+				     iolist_to_binary(atom_to_list(Module)),
+				 {NumLines, SOptsClean} =
+				     term_to_paragraph(OptsClean, 40),
+				 ?XE(<<"tr">>,
+				     [?XAE(<<"td">>, [{<<"size">>, <<"6">>}],
+					   [?C(SPort)]),
+				      ?XAE(<<"td">>, [{<<"size">>, <<"15">>}],
+					   [?C(SIP)]),
+				      ?XAE(<<"td">>, [{<<"size">>, <<"4">>}],
+					   [?C((iolist_to_binary(atom_to_list(NetProt))))]),
+				      ?XE(<<"td">>,
+					  [?INPUTS(<<"text">>,
+						   <<"module", SSPort/binary>>,
+						   SModule, <<"15">>)]),
+				      ?XAE(<<"td">>, direction(ltr),
+					  [?TEXTAREA(<<"opts", SSPort/binary>>,
+						     (integer_to_binary(NumLines)),
+						     <<"35">>, SOptsClean)]),
+				      ?XE(<<"td">>,
+					  [?INPUTT(<<"submit">>,
+						   <<"add", SSPort/binary>>,
+						   <<"Restart">>)]),
+				      ?XE(<<"td">>,
+					  [?INPUTT(<<"submit">>,
+						   <<"delete", SSPort/binary>>,
+						   <<"Stop">>)])])
+			 end,
+			 Ports)
+		 ++
+		 [?XE(<<"tr">>,
+		      [?XE(<<"td">>,
+			   [?INPUTS(<<"text">>, <<"portnew">>, <<"">>,
+				    <<"6">>)]),
+		       ?XE(<<"td">>,
+			   [?INPUTS(<<"text">>, <<"ipnew">>, <<"0.0.0.0">>,
+				    <<"15">>)]),
+		       ?XE(<<"td">>, [make_netprot_html(<<"tcp">>)]),
+		       ?XE(<<"td">>,
+			   [?INPUTS(<<"text">>, <<"modulenew">>, <<"">>,
+				    <<"15">>)]),
+		       ?XAE(<<"td">>, direction(ltr),
+			   [?TEXTAREA(<<"optsnew">>, <<"2">>, <<"35">>,
+				      <<"[]">>)]),
+		       ?XAE(<<"td">>, [{<<"colspan">>, <<"2">>}],
+			    [?INPUTT(<<"submit">>, <<"addnew">>,
+				     <<"Start">>)])])]))]).
+
+make_netprot_html(NetProt) ->
+    ?XAE(<<"select">>, [{<<"name">>, <<"netprotnew">>}],
+	 (lists:map(fun (O) ->
+			    Sel = if O == NetProt ->
+					 [{<<"selected">>, <<"selected">>}];
+				     true -> []
+				  end,
+			    ?XAC(<<"option">>, (Sel ++ [{<<"value">>, O}]), O)
+		    end,
+		    [<<"tcp">>, <<"udp">>]))).
+
+get_port_data(PortIP, Opts) ->
+    {Port, IPT, IPS, _IPV, NetProt, OptsClean} =
+	ejabberd_listener:parse_listener_portip(PortIP, Opts),
+    SPort = integer_to_binary(Port),
+    SSPort = list_to_binary(
+               lists:map(fun (N) ->
+                                 io_lib:format("~.16b", [N])
+                         end,
+                         binary_to_list(
+                           erlang:md5(
+                             [SPort, IPS, atom_to_list(NetProt)])))),
+    {Port, SPort, IPT, IPS, SSPort, NetProt, OptsClean}.
+
+node_ports_parse_query(Node, Ports, Query) ->
+    lists:foreach(fun ({PortIpNetp, Module1, Opts1}) ->
+			  {Port, _SPort, TIP, _SIP, SSPort, NetProt,
+			   _OptsClean} =
+			      get_port_data(PortIpNetp, Opts1),
+			  case lists:keysearch(<<"add", SSPort/binary>>, 1,
+					       Query)
+			      of
+			    {value, _} ->
+				PortIpNetp2 = {Port, TIP, NetProt},
+				{{value, {_, SModule}}, {value, {_, SOpts}}} =
+				    {lists:keysearch(<<"module",
+						       SSPort/binary>>,
+						     1, Query),
+				     lists:keysearch(<<"opts", SSPort/binary>>,
+						     1, Query)},
+				Module = misc:binary_to_atom(SModule),
+				{ok, Tokens, _} =
+				    erl_scan:string(binary_to_list(SOpts) ++ "."),
+				{ok, Opts} = erl_parse:parse_term(Tokens),
+				ejabberd_cluster:call(Node, ejabberd_listener,
+					 delete_listener,
+					 [PortIpNetp2, Module1]),
+				R = ejabberd_cluster:call(Node, ejabberd_listener,
+					     add_listener,
+					     [PortIpNetp2, Module, Opts]),
+				throw({is_added, R});
+			    _ ->
+				case lists:keysearch(<<"delete",
+						       SSPort/binary>>,
+						     1, Query)
+				    of
+				  {value, _} ->
+				      ejabberd_cluster:call(Node, ejabberd_listener,
+					       delete_listener,
+					       [PortIpNetp, Module1]),
+				      throw(submitted);
+				  _ -> ok
+				end
+			  end
+		  end,
+		  Ports),
+    case lists:keysearch(<<"addnew">>, 1, Query) of
+      {value, _} ->
+	  {{value, {_, SPort}}, {value, {_, STIP}},
+	   {value, {_, SNetProt}}, {value, {_, SModule}},
+	   {value, {_, SOpts}}} =
+	      {lists:keysearch(<<"portnew">>, 1, Query),
+	       lists:keysearch(<<"ipnew">>, 1, Query),
+	       lists:keysearch(<<"netprotnew">>, 1, Query),
+	       lists:keysearch(<<"modulenew">>, 1, Query),
+	       lists:keysearch(<<"optsnew">>, 1, Query)},
+	  {ok, Toks, _} = erl_scan:string(binary_to_list(<<SPort/binary, ".">>)),
+	  {ok, Port2} = erl_parse:parse_term(Toks),
+	  {ok, ToksIP, _} = erl_scan:string(binary_to_list(<<STIP/binary, ".">>)),
+	  STIP2 = case erl_parse:parse_term(ToksIP) of
+		    {ok, IPTParsed} -> IPTParsed;
+		    {error, _} -> STIP
+		  end,
+	  Module = misc:binary_to_atom(SModule),
+	  NetProt2 = misc:binary_to_atom(SNetProt),
+	  {ok, Tokens, _} = erl_scan:string(binary_to_list(<<SOpts/binary, ".">>)),
+	  {ok, Opts} = erl_parse:parse_term(Tokens),
+	  {Port2, _SPort, IP2, _SIP, _SSPort, NetProt2,
+	   OptsClean} =
+	      get_port_data({Port2, STIP2, NetProt2}, Opts),
+	  R = ejabberd_cluster:call(Node, ejabberd_listener, add_listener,
+		       [{Port2, IP2, NetProt2}, Module, OptsClean]),
+	  throw({is_added, R});
+      _ -> ok
+    end.
+
+node_modules_to_xhtml(Modules, Lang) ->
+    ?XAE(<<"table">>, [{<<"class">>, <<"withtextareas">>}],
+	 [?XE(<<"thead">>,
+	      [?XE(<<"tr">>,
+		   [?XCT(<<"td">>, <<"Module">>),
+		    ?XCT(<<"td">>, <<"Options">>)])]),
+	  ?XE(<<"tbody">>,
+	      (lists:map(fun ({Module, Opts} = _E) ->
+				 SModule =
+				     iolist_to_binary(atom_to_list(Module)),
+				 {NumLines, SOpts} = term_to_paragraph(Opts,
+								       40),
+				 ?XE(<<"tr">>,
+				     [?XC(<<"td">>, SModule),
+				      ?XAE(<<"td">>, direction(ltr),
+					  [?TEXTAREA(<<"opts", SModule/binary>>,
+						     (integer_to_binary(NumLines)),
+						     <<"40">>, SOpts)]),
+				      ?XE(<<"td">>,
+					  [?INPUTT(<<"submit">>,
+						   <<"restart",
+						     SModule/binary>>,
+						   <<"Restart">>)]),
+				      ?XE(<<"td">>,
+					  [?INPUTT(<<"submit">>,
+						   <<"stop", SModule/binary>>,
+						   <<"Stop">>)])])
+			 end,
+			 Modules)
+		 ++
+		 [?XE(<<"tr">>,
+		      [?XE(<<"td">>,
+			   [?INPUT(<<"text">>, <<"modulenew">>, <<"">>)]),
+		       ?XAE(<<"td">>, direction(ltr),
+			   [?TEXTAREA(<<"optsnew">>, <<"2">>, <<"40">>,
+				      <<"[]">>)]),
+		       ?XAE(<<"td">>, [{<<"colspan">>, <<"2">>}],
+			    [?INPUTT(<<"submit">>, <<"start">>,
+				     <<"Start">>)])])]))]).
+
+node_modules_parse_query(Host, Node, Modules, Query) ->
+    lists:foreach(fun ({Module, _Opts1}) ->
+			  SModule = iolist_to_binary(atom_to_list(Module)),
+			  case lists:keysearch(<<"restart", SModule/binary>>, 1,
+					       Query)
+			      of
+			    {value, _} ->
+				{value, {_, SOpts}} = lists:keysearch(<<"opts",
+									SModule/binary>>,
+								      1, Query),
+				{ok, Tokens, _} =
+				    erl_scan:string(binary_to_list(<<SOpts/binary, ".">>)),
+				{ok, Opts} = erl_parse:parse_term(Tokens),
+				ejabberd_cluster:call(Node, gen_mod, stop_module,
+					 [Host, Module]),
+				ejabberd_cluster:call(Node, gen_mod, start_module,
+					 [Host, Module, Opts]),
+				throw(submitted);
+			    _ ->
+				case lists:keysearch(<<"stop", SModule/binary>>,
+						     1, Query)
+				    of
+				  {value, _} ->
+				      ejabberd_cluster:call(Node, gen_mod, stop_module,
+					       [Host, Module]),
+				      throw(submitted);
+				  _ -> ok
+				end
+			  end
+		  end,
+		  Modules),
+    case lists:keysearch(<<"start">>, 1, Query) of
+      {value, _} ->
+	  {{value, {_, SModule}}, {value, {_, SOpts}}} =
+	      {lists:keysearch(<<"modulenew">>, 1, Query),
+	       lists:keysearch(<<"optsnew">>, 1, Query)},
+	  Module = misc:binary_to_atom(SModule),
+	  {ok, Tokens, _} = erl_scan:string(binary_to_list(<<SOpts/binary, ".">>)),
+	  {ok, Opts} = erl_parse:parse_term(Tokens),
+	  ejabberd_cluster:call(Node, gen_mod, start_module,
+		   [Host, Module, Opts]),
+	  throw(submitted);
+      _ -> ok
+    end.
+
 node_update_parse_query(Node, Query) ->
     case lists:keysearch(<<"update">>, 1, Query) of
       {value, _} ->
@@ -1712,6 +2503,16 @@ pretty_print_xml(#xmlel{name = Name, attrs = Attrs,
 	    end
      end].
 
+element_to_list(X) when is_atom(X) ->
+    iolist_to_binary(atom_to_list(X));
+element_to_list(X) when is_integer(X) ->
+    integer_to_binary(X).
+
+list_to_element(Bin) ->
+    {ok, Tokens, _} = erl_scan:string(binary_to_list(Bin)),
+    [{_, _, Element}] = Tokens,
+    Element.
+
 url_func({user_diapason, From, To}) ->
     <<(integer_to_binary(From))/binary, "-",
       (integer_to_binary(To))/binary, "/">>;
@@ -1743,8 +2544,8 @@ pretty_string_int(String) when is_binary(String) ->
 %%%% navigation menu
 
 %% @spec (Host, Node, Lang, JID::jid()) -> [LI]
-make_navigation(Host, Node, Lang, JID, Level) ->
-    Menu = make_navigation_menu(Host, Node, Lang, JID, Level),
+make_navigation(Host, Node, Lang, JID) ->
+    Menu = make_navigation_menu(Host, Node, Lang, JID),
     make_menu_items(Lang, Menu).
 
 %% @spec (Host, Node, Lang, JID::jid()) -> Menu
@@ -1754,13 +2555,13 @@ make_navigation(Host, Node, Lang, JID, Level) ->
 %%       Menu = {URL, Title} | {URL, Title, [Menu]}
 %%       URL = string()
 %%       Title = string()
-make_navigation_menu(Host, Node, Lang, JID, Level) ->
+make_navigation_menu(Host, Node, Lang, JID) ->
     HostNodeMenu = make_host_node_menu(Host, Node, Lang,
-				       JID, Level),
+				       JID),
     HostMenu = make_host_menu(Host, HostNodeMenu, Lang,
-			      JID, Level),
-    NodeMenu = make_node_menu(Host, Node, Lang, Level),
-    make_server_menu(HostMenu, NodeMenu, Lang, JID, Level).
+			      JID),
+    NodeMenu = make_node_menu(Host, Node, Lang),
+    make_server_menu(HostMenu, NodeMenu, Lang, JID).
 
 %% @spec (Host, Node, Base, Lang) -> [LI]
 make_menu_items(global, cluster, Base, Lang) ->
@@ -1777,13 +2578,14 @@ make_menu_items(Host, Node, Base, Lang) ->
 				    Lang),
     make_menu_items(Lang, {Base, <<"">>, HookItems}).
 
-make_host_node_menu(global, _, _Lang, _JID, _Level) ->
+make_host_node_menu(global, _, _Lang, _JID) ->
     {<<"">>, <<"">>, []};
-make_host_node_menu(_, cluster, _Lang, _JID, _Level) ->
+make_host_node_menu(_, cluster, _Lang, _JID) ->
     {<<"">>, <<"">>, []};
-make_host_node_menu(Host, Node, Lang, JID, Level) ->
-    HostNodeBase = get_base_path(Host, Node, Level),
-    HostNodeFixed = get_menu_items_hook({hostnode, Host, Node}, Lang),
+make_host_node_menu(Host, Node, Lang, JID) ->
+    HostNodeBase = get_base_path(Host, Node),
+    HostNodeFixed = [{<<"modules/">>, <<"Modules">>}] ++
+		      get_menu_items_hook({hostnode, Host, Node}, Lang),
     HostNodeBasePath = url_to_path(HostNodeBase),
     HostNodeFixed2 = [Tuple
 		      || Tuple <- HostNodeFixed,
@@ -1791,16 +2593,18 @@ make_host_node_menu(Host, Node, Lang, JID, Level) ->
     {HostNodeBase, iolist_to_binary(atom_to_list(Node)),
      HostNodeFixed2}.
 
-make_host_menu(global, _HostNodeMenu, _Lang, _JID, _Level) ->
+make_host_menu(global, _HostNodeMenu, _Lang, _JID) ->
     {<<"">>, <<"">>, []};
-make_host_menu(Host, HostNodeMenu, Lang, JID, Level) ->
-    HostBase = get_base_path(Host, cluster, Level),
-    HostFixed = [{<<"users">>, ?T("Users")},
-		 {<<"online-users">>, ?T("Online Users")}]
+make_host_menu(Host, HostNodeMenu, Lang, JID) ->
+    HostBase = get_base_path(Host, cluster),
+    HostFixed = [{<<"acls">>, <<"Access Control Lists">>},
+		 {<<"access">>, <<"Access Rules">>},
+		 {<<"users">>, <<"Users">>},
+		 {<<"online-users">>, <<"Online Users">>}]
 		  ++
 		  get_lastactivity_menuitem_list(Host) ++
-		    [{<<"nodes">>, ?T("Nodes"), HostNodeMenu},
-		     {<<"stats">>, ?T("Statistics")}]
+		    [{<<"nodes">>, <<"Nodes">>, HostNodeMenu},
+		     {<<"stats">>, <<"Statistics">>}]
 		      ++ get_menu_items_hook({host, Host}, Lang),
     HostBasePath = url_to_path(HostBase),
     HostFixed2 = [Tuple
@@ -1808,25 +2612,28 @@ make_host_menu(Host, HostNodeMenu, Lang, JID, Level) ->
 		     is_allowed_path(HostBasePath, Tuple, JID)],
     {HostBase, Host, HostFixed2}.
 
-make_node_menu(_Host, cluster, _Lang, _Level) ->
+make_node_menu(_Host, cluster, _Lang) ->
     {<<"">>, <<"">>, []};
-make_node_menu(global, Node, Lang, Level) ->
-    NodeBase = get_base_path(global, Node, Level),
-    NodeFixed = [{<<"db">>, ?T("Database")},
-		 {<<"backup">>, ?T("Backup")},
-		 {<<"stats">>, ?T("Statistics")},
-		 {<<"update">>, ?T("Update")}]
+make_node_menu(global, Node, Lang) ->
+    NodeBase = get_base_path(global, Node),
+    NodeFixed = [{<<"db/">>, <<"Database">>},
+		 {<<"backup/">>, <<"Backup">>},
+		 {<<"ports/">>, <<"Listened Ports">>},
+		 {<<"stats/">>, <<"Statistics">>},
+		 {<<"update/">>, <<"Update">>}]
 		  ++ get_menu_items_hook({node, Node}, Lang),
     {NodeBase, iolist_to_binary(atom_to_list(Node)),
      NodeFixed};
-make_node_menu(_Host, _Node, _Lang, _Level) ->
+make_node_menu(_Host, _Node, _Lang) ->
     {<<"">>, <<"">>, []}.
 
-make_server_menu(HostMenu, NodeMenu, Lang, JID, Level) ->
-    Base = get_base_path(global, cluster, Level),
-    Fixed = [{<<"vhosts">>, ?T("Virtual Hosts"), HostMenu},
-	     {<<"nodes">>, ?T("Nodes"), NodeMenu},
-	     {<<"stats">>, ?T("Statistics")}]
+make_server_menu(HostMenu, NodeMenu, Lang, JID) ->
+    Base = get_base_path(global, cluster),
+    Fixed = [{<<"acls">>, <<"Access Control Lists">>},
+	     {<<"access">>, <<"Access Rules">>},
+	     {<<"vhosts">>, <<"Virtual Hosts">>, HostMenu},
+	     {<<"nodes">>, <<"Nodes">>, NodeMenu},
+	     {<<"stats">>, <<"Statistics">>}]
 	      ++ get_menu_items_hook(server, Lang),
     BasePath = url_to_path(Base),
     Fixed2 = [Tuple
@@ -1897,10 +2704,12 @@ make_menu_item(item, 3, URI, Name, Lang) ->
     ?LI([?XAE(<<"div">>, [{<<"id">>, <<"navitemsubsub">>}],
 	      [?ACT(URI, Name)])]).
 
-any_rules_allowed(Host, Access, Entity) ->
-    lists:any(
-      fun(Rule) ->
-	      allow == acl:match_rule(Host, Rule, Entity)
-      end, Access).
+%%%==================================
+
+
+-spec opt_type(access_readonly) -> fun((any()) -> any());
+	      (atom()) -> [atom()].
+opt_type(access_readonly) -> fun acl:access_rules_validator/1;
+opt_type(_) -> [access_readonly].
 
 %%% vim: set foldmethod=marker foldmarker=%%%%,%%%=:

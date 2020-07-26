@@ -5,7 +5,7 @@
 %%% Created :  2 Feb 2003 by Alexey Shchepin <alexey@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -30,6 +30,7 @@
 %% External exports
 -export([import_file/1, import_dir/1]).
 
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include("xmpp.hrl").
 
@@ -50,24 +51,24 @@ import_file(File) ->
 		  El when is_record(El, xmlel) ->
 		      case catch process_xdb(User, Server, El) of
 			{'EXIT', Reason} ->
-			    ?ERROR_MSG("Error while processing file \"~ts\": "
+			    ?ERROR_MSG("Error while processing file \"~s\": "
 				       "~p~n",
 				       [File, Reason]),
 			    {error, Reason};
 			_ -> ok
 		      end;
 		  {error, Reason} ->
-		      ?ERROR_MSG("Can't parse file \"~ts\": ~p~n",
+		      ?ERROR_MSG("Can't parse file \"~s\": ~p~n",
 				 [File, Reason]),
 		      {error, Reason}
 		end;
 	    {error, Reason} ->
-		?ERROR_MSG("Can't read file \"~ts\": ~p~n",
+		?ERROR_MSG("Can't read file \"~s\": ~p~n",
 			   [File, Reason]),
 		{error, Reason}
 	  end;
       false ->
-	  ?ERROR_MSG("Illegal user/server name in file \"~ts\"~n",
+	  ?ERROR_MSG("Illegal user/server name in file \"~s\"~n",
 		     [File]),
 	  {error, <<"illegal user/server">>}
     end.
@@ -111,6 +112,7 @@ process_xdb(User, Server,
 xdb_data(_User, _Server, {xmlcdata, _CData}) -> ok;
 xdb_data(User, Server, #xmlel{attrs = Attrs} = El) ->
     From = jid:make(User, Server),
+    LUser = From#jid.luser,
     LServer = From#jid.lserver,
     case fxml:get_attr_s(<<"xmlns">>, Attrs) of
       ?NS_AUTH ->
@@ -141,10 +143,10 @@ xdb_data(User, Server, #xmlel{attrs = Attrs} = El) ->
 				(_) -> true
 			     end, Attrs),
 		catch mod_private:set_data(
-			From,
+			LUser, LServer,
 			[{XMLNS, El#xmlel{attrs = NewAttrs}}]);
 	    _ ->
-		?DEBUG("Unknown namespace \"~ts\"~n", [XMLNS])
+		?DEBUG("jd2ejd: Unknown namespace \"~s\"~n", [XMLNS])
 	  end,
 	  ok
     end.
@@ -166,7 +168,7 @@ process_offline(Server, To, #xmlel{children = Els}) ->
 		      ok
 	      catch _:{xmpp_codec, Why} ->
 		      Txt = xmpp:format_error(Why),
-		      ?ERROR_MSG("Failed to decode XML '~ts': ~ts",
+		      ?ERROR_MSG("failed to decode XML '~s': ~s",
 				 [fxml:element_to_binary(El), Txt])
 	      end
       end, Els).

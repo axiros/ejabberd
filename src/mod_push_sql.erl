@@ -5,7 +5,7 @@
 %%% Created : 26 Oct 2017 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2017-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2017-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -25,6 +25,7 @@
 
 -module(mod_push_sql).
 -behaviour(mod_push).
+-compile([{parse_transform, ejabberd_sql_pt}]).
 
 %% API
 -export([init/2, store_session/6, lookup_session/4, lookup_session/3,
@@ -47,8 +48,6 @@ store_session(LUser, LServer, NowTS, PushJID, Node, XData) ->
     TS = misc:now_to_usec(NowTS),
     PushLJID = jid:tolower(PushJID),
     Service = jid:encode(PushLJID),
-    MaxSessions = ejabberd_sm:get_max_user_sessions(LUser, LServer),
-    enforce_max_sessions(LUser, LServer, MaxSessions),
     case ?SQL_UPSERT(LServer, "push_session",
 		     ["!username=%(LUser)s",
                       "!server_host=%(LServer)s",
@@ -208,24 +207,6 @@ export(_Server) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-enforce_max_sessions(_LUser, _LServer, infinity) ->
-    ok;
-enforce_max_sessions(LUser, LServer, MaxSessions) ->
-    case lookup_sessions(LUser, LServer) of
-	{ok, Sessions} when length(Sessions) >= MaxSessions ->
-	    ?INFO_MSG("Disabling old push session(s) of ~ts@~ts",
-		      [LUser, LServer]),
-	    Sessions1 = lists:sort(fun({TS1, _, _, _}, {TS2, _, _, _}) ->
-					   TS1 >= TS2
-				   end, Sessions),
-	    OldSessions = lists:nthtail(MaxSessions - 1, Sessions1),
-	    lists:foreach(fun({TS, _, _, _}) ->
-				  delete_session(LUser, LServer, TS)
-			  end, OldSessions);
-	_ ->
-	    ok
-    end.
-
 decode_xdata(<<>>, _LUser, _LServer) ->
     undefined;
 decode_xdata(XML, LUser, LServer) ->
@@ -233,13 +214,13 @@ decode_xdata(XML, LUser, LServer) ->
 	#xmlel{} = El ->
 	    try xmpp:decode(El)
 	    catch _:{xmpp_codec, Why} ->
-		    ?ERROR_MSG("Failed to decode ~ts for user ~ts@~ts "
-			       "from table 'push_session': ~ts",
+		    ?ERROR_MSG("Failed to decode ~s for user ~s@~s "
+			       "from table 'push_session': ~s",
 			       [XML, LUser, LServer, xmpp:format_error(Why)]),
 		    undefined
 	    end;
 	Err ->
-	    ?ERROR_MSG("Failed to decode ~ts for user ~ts@~ts from "
+	    ?ERROR_MSG("Failed to decode ~s for user ~s@~s from "
 		       "table 'push_session': ~p",
 		       [XML, LUser, LServer, Err]),
 	    undefined

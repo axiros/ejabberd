@@ -5,7 +5,7 @@
 %%% Created : 20 May 2008 by Badlop <badlop@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -200,7 +200,7 @@
 %%% command.
 
 %%% TODO: consider this feature:
-%%% All commands are caught. If an error happens, return the restuple:
+%%% All commands are catched. If an error happens, return the restuple:
 %%%   {error, flattened error string}
 %%% This means that ecomm call APIs (ejabberd_ctl, ejabberd_xmlrpc)
 %%% need to allows this. And ejabberd_xmlrpc must be prepared to
@@ -211,6 +211,7 @@
 -author('badlop@process-one.net').
 
 -behaviour(gen_server).
+-behaviour(ejabberd_config).
 
 -define(DEFAULT_VERSION, 1000000).
 
@@ -224,8 +225,11 @@
 	 get_command_definition/2,
 	 get_tags_commands/0,
 	 get_tags_commands/1,
+	 get_exposed_commands/0,
 	 register_commands/1,
 	 unregister_commands/1,
+	 expose_commands/1,
+	 opt_type/1,
 	 get_commands_spec/0,
 	 get_commands_definition/0,
 	 get_commands_definition/1,
@@ -236,12 +240,11 @@
 	 terminate/2, code_change/3]).
 
 -include("ejabberd_commands.hrl").
+-include("ejabberd.hrl").
 -include("logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -define(POLICY_ACCESS, '$policy').
-
--type auth() :: {binary(), binary(), binary() | {oauth, binary()}, boolean()} | map().
 
 -record(state, {}).
 
@@ -256,9 +259,9 @@ get_commands_spec() ->
                                         "documentation should be stored",
                                         "Regexp matching names of commands or modules "
                                         "that will be included inside generated document",
-                                        "Comma separated list of languages (chosen from java, perl, xmlrpc, json)"
+                                        "Comma separated list of languages (choosen from java, perl, xmlrpc, json)"
                                         "that will have example invocation include in markdown document"],
-                           result_desc = "0 if command failed, 1 when succeeded",
+                           result_desc = "0 if command failed, 1 when succedded",
                            args_example = ["/home/me/docs/api.html", "mod_admin", "java,json"],
                            result_example = ok},
         #ejabberd_commands{name = gen_markdown_doc_for_commands, tags = [documentation],
@@ -270,9 +273,9 @@ get_commands_spec() ->
                                         "documentation should be stored",
                                         "Regexp matching names of commands or modules "
                                         "that will be included inside generated document",
-                                        "Comma separated list of languages (chosen from java, perl, xmlrpc, json)"
+                                        "Comma separated list of languages (choosen from java, perl, xmlrpc, json)"
                                         "that will have example invocation include in markdown document"],
-                           result_desc = "0 if command failed, 1 when succeeded",
+                           result_desc = "0 if command failed, 1 when succedded",
                            args_example = ["/home/me/docs/api.html", "mod_admin", "java,json"],
                            result_example = ok}].
 
@@ -290,18 +293,17 @@ init([]) ->
                          {attributes, record_info(fields, ejabberd_commands)},
                          {type, bag}]),
     register_commands(get_commands_spec()),
+    ejabberd_access_permissions:register_permission_addon(?MODULE, fun permission_addon/0),
     {ok, #state{}}.
 
-handle_call(Request, From, State) ->
-    ?WARNING_MSG("Unexpected call from ~p: ~p", [From, Request]),
+handle_call(_Request, _From, State) ->
+    Reply = ok,
+    {reply, Reply, State}.
+
+handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_cast(Msg, State) ->
-    ?WARNING_MSG("Unexpected cast: ~p", [Msg]),
-    {noreply, State}.
-
-handle_info(Info, State) ->
-    ?WARNING_MSG("Unexpected info: ~p", [Info]),
+handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -337,7 +339,29 @@ unregister_commands(Commands) ->
 	      mnesia:dirty_delete_object(Command)
       end,
       Commands),
-    ejabberd_access_permissions:invalidate().
+    ejabberd_access_permissions:invalidate(),
+    ok.
+
+%% @doc Expose command through ejabberd ReST API.
+%% Pass a list of command names or policy to expose.
+-spec expose_commands([ejabberd_commands()|atom()|open|user|admin|restricted]) -> ok | {error, atom()}.
+
+expose_commands(Commands) ->
+    Names = lists:map(fun(#ejabberd_commands{name = Name}) ->
+                              Name;
+                         (Name) when is_atom(Name) ->
+                              Name
+                      end,
+                      Commands),
+
+    case ejabberd_config:add_option(commands, [{add_commands, Names}]) of
+	ok ->
+	    ok;
+        {aborted, Reason} ->
+            {error, Reason};
+        {atomic, Result} ->
+            Result
+    end.
 
 -spec list_commands() -> [{atom(), [aterm()], string()}].
 
@@ -348,14 +372,28 @@ list_commands() ->
 -spec list_commands(integer()) -> [{atom(), [aterm()], string()}].
 
 %% @doc Get a list of all the available commands, arguments and
-%% description in a given API version.
+%% description in a given API verion.
 list_commands(Version) ->
     Commands = get_commands_definition(Version),
     [{Name, Args, Desc} || #ejabberd_commands{name = Name,
                                               args = Args,
                                               desc = Desc} <- Commands].
 
--spec get_command_format(atom()) -> {[aterm()], [{atom(),atom()}], rterm()}.
+
+-spec list_commands_policy(integer()) ->
+				  [{atom(), [aterm()], string(), atom()}].
+
+%% @doc Get a list of all the available commands, arguments,
+%% description, and policy in a given API version.
+list_commands_policy(Version) ->
+    Commands = get_commands_definition(Version),
+    [{Name, Args, Desc, Policy} ||
+        #ejabberd_commands{name = Name,
+                           args = Args,
+                           desc = Desc,
+                           policy = Policy} <- Commands].
+
+-spec get_command_format(atom()) -> {[aterm()], rterm()}.
 
 %% @doc Get the format of arguments and result of a command.
 get_command_format(Name) ->
@@ -365,21 +403,31 @@ get_command_format(Name, Version) when is_integer(Version) ->
 get_command_format(Name, Auth)  ->
     get_command_format(Name, Auth, ?DEFAULT_VERSION).
 
--spec get_command_format(atom(), noauth | admin | auth(), integer()) -> {[aterm()], [{atom(),atom()}], rterm()}.
+-spec get_command_format(atom(),
+			 {binary(), binary(), binary(), boolean()} |
+			 noauth | admin,
+			 integer()) ->
+				{[aterm()], rterm()}.
+
 get_command_format(Name, Auth, Version) ->
     Admin = is_admin(Name, Auth, #{}),
     #ejabberd_commands{args = Args,
 		       result = Result,
-		       args_rename = Rename,
                        policy = Policy} =
         get_command_definition(Name, Version),
     case Policy of
         user when Admin;
                   Auth == noauth ->
-            {[{user, binary}, {host, binary} | Args], Rename, Result};
+            {[{user, binary}, {server, binary} | Args], Result};
         _ ->
-            {Args, Rename, Result}
+            {Args, Result}
     end.
+
+%% The oauth scopes for a command are the command name itself,
+%% also might include either 'ejabberd:user' or 'ejabberd:admin'
+cmd_scope(#ejabberd_commands{policy = Policy, name = Name}) ->
+    [erlang:atom_to_binary(Name,utf8)] ++ [<<"ejabberd:user">> || Policy == user] ++ [<<"ejabberd:admin">> || Policy == admin].
+
 
 -spec get_command_definition(atom()) -> ejabberd_commands().
 
@@ -445,7 +493,6 @@ do_execute_command(Command, Arguments) ->
     Module = Command#ejabberd_commands.module,
     Function = Command#ejabberd_commands.function,
     ?DEBUG("Executing command ~p:~p with Args=~p", [Module, Function, Arguments]),
-    ejabberd_hooks:run(api_call, [Module, Function, Arguments]),
     apply(Module, Function, Arguments).
 
 -spec get_tags_commands() -> [{string(), [string()]}].
@@ -486,12 +533,97 @@ get_tags_commands(Version) ->
 %% -----------------------------
 %% Access verification
 %% -----------------------------
--spec is_admin(atom(), admin | noauth | auth(), map()) -> boolean().
+
+-spec check_auth(ejabberd_commands(), noauth) -> noauth_provided;
+                (ejabberd_commands(),
+                 {binary(), binary(), binary(), boolean()}) ->
+    {ok, binary(), binary()}.
+
+check_auth(_Command, noauth) ->
+    no_auth_provided;
+check_auth(Command, {User, Server, {oauth, Token}, _}) ->
+    ScopeList = cmd_scope(Command),
+    case ejabberd_oauth:check_token(User, Server, ScopeList, Token) of
+        true ->
+            {ok, User, Server};
+        _ ->
+            throw({error, invalid_account_data})
+    end;
+check_auth(_Command, {User, Server, Password, _}) when is_binary(Password) ->
+    %% Check the account exists and password is valid
+    case ejabberd_auth:check_password(User, <<"">>, Server, Password) of
+        true -> {ok, User, Server};
+        _ -> throw({error, invalid_account_data})
+    end.
+
+get_exposed_commands() ->
+    get_exposed_commands(?DEFAULT_VERSION).
+get_exposed_commands(Version) ->
+    Opts0 = ejabberd_config:get_option(commands, []),
+    Opts = lists:map(fun(V) when is_tuple(V) -> [V]; (V) -> V end, Opts0),
+    CommandsList = list_commands_policy(Version),
+    OpenCmds = [N || {N, _, _, open} <- CommandsList],
+    RestrictedCmds = [N || {N, _, _, restricted} <- CommandsList],
+    AdminCmds = [N || {N, _, _, admin} <- CommandsList],
+    UserCmds = [N || {N, _, _, user} <- CommandsList],
+    Cmds =
+        lists:foldl(
+          fun([{add_commands, L}], Acc) ->
+                  Cmds = expand_commands(L, OpenCmds, UserCmds, AdminCmds, RestrictedCmds),
+                  lists:usort(Cmds ++ Acc);
+             ([{remove_commands, L}], Acc) ->
+                  Cmds = expand_commands(L, OpenCmds, UserCmds, AdminCmds, RestrictedCmds),
+                  Acc -- Cmds;
+             (_, Acc) -> Acc
+          end, [], Opts),
+    Cmds.
+
+%% This is used to allow mixing command policy (like open, user, admin, restricted), with command entry
+expand_commands(L, OpenCmds, UserCmds, AdminCmds, RestrictedCmds) when is_atom(L) ->
+    expand_commands([L], OpenCmds, UserCmds, AdminCmds, RestrictedCmds);
+expand_commands(L, OpenCmds, UserCmds, AdminCmds, RestrictedCmds) when is_list(L) ->
+    lists:foldl(fun(open, Acc) -> OpenCmds ++ Acc;
+                   (user, Acc) -> UserCmds ++ Acc;
+                   (admin, Acc) -> AdminCmds ++ Acc;
+                   (restricted, Acc) -> RestrictedCmds ++ Acc;
+                   (Command, Acc) when is_atom(Command) ->
+                        [Command|Acc]
+                end, [], L).
+
 is_admin(_Name, admin, _Extra) ->
     true;
 is_admin(_Name, {_User, _Server, _, false}, _Extra) ->
     false;
 is_admin(_Name, Map, _extra) when is_map(Map) ->
     true;
-is_admin(_Name, _Auth, _Extra) ->
-    false.
+is_admin(Name, Auth, Extra) ->
+    {ACLInfo, Server} = case Auth of
+			    {U, S, _, _} ->
+				{Extra#{usr=>jid:split(jid:make(U, S))}, S};
+			    _ ->
+				{Extra, global}
+	      end,
+    AdminAccess = ejabberd_config:get_option(commands_admin_access, none),
+    case acl:access_matches(AdminAccess, ACLInfo, Server) of
+        allow ->
+            case catch check_auth(get_command_definition(Name), Auth) of
+                {ok, _, _} -> true;
+		no_auth_provided -> true;
+                _ -> false
+            end;
+        deny -> false
+    end.
+
+permission_addon() ->
+    [{<<"'commands' option compatibility shim">>,
+     {[],
+      [{access, ejabberd_config:get_option(commands_admin_access, none)}],
+      {get_exposed_commands(), []}}}].
+
+-spec opt_type(commands_admin_access) -> fun((any()) -> any());
+	      (commands) -> fun((list()) -> list());
+	      (atom()) -> [atom()].
+opt_type(commands_admin_access) -> fun acl:access_rules_validator/1;
+opt_type(commands) ->
+    fun(V) when is_list(V) -> V end;
+opt_type(_) -> [commands, commands_admin_access].

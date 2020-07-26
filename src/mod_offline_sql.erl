@@ -4,7 +4,7 @@
 %%% Created : 15 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -24,6 +24,7 @@
 
 -module(mod_offline_sql).
 
+-compile([{parse_transform, ejabberd_sql_pt}]).
 
 -behaviour(mod_offline).
 
@@ -47,7 +48,7 @@ store_message(#offline_msg{us = {LUser, LServer}} = M) ->
     From = M#offline_msg.from,
     To = M#offline_msg.to,
     Packet = xmpp:set_from_to(M#offline_msg.packet, From, To),
-    NewPacket = misc:add_delay_info(
+    NewPacket = xmpp_util:add_delay_info(
 		  Packet, jid:make(LServer),
 		  M#offline_msg.timestamp,
 		  <<"Offline Storage">>),
@@ -89,17 +90,8 @@ remove_expired_messages(_LServer) ->
 remove_old_messages(Days, LServer) ->
     case ejabberd_sql:sql_query(
 	   LServer,
-           fun(pgsql, _) ->
-                   ejabberd_sql:sql_query_t(
-                     ?SQL("DELETE FROM spool"
-                          " WHERE created_at <"
-                          " NOW() - %(Days)d * INTERVAL '1 DAY'"));
-              (_, _) ->
-                   ejabberd_sql:sql_query_t(
-                     ?SQL("DELETE FROM spool"
-                          " WHERE created_at < NOW() - INTERVAL %(Days)d DAY"))
-              end)
-        of
+	   ?SQL("DELETE FROM spool"
+                " WHERE created_at < NOW() - INTERVAL %(Days)d DAY")) of
 	{updated, N} ->
 	    ?INFO_MSG("~p message(s) deleted from offline spool", [N]);
 	_Error ->
@@ -131,7 +123,7 @@ read_message_headers(LUser, LServer) ->
 		      end
 	      end, Rows);
 	_Err ->
-	    error
+	    []
     end.
 
 read_message(LUser, LServer, Seq) ->
@@ -185,11 +177,8 @@ count_messages(LUser, LServer) ->
                  ?SQL("select @(count(*))d from spool "
                       "where username=%(LUser)s and %(LServer)H")) of
         {selected, [{Res}]} ->
-            {cache, Res};
-	{selected, []} ->
-	    {cache, 0};
-        _ ->
-	    {nocache, 0}
+            Res;
+        _ -> 0
     end.
 
 export(_Server) ->
@@ -209,7 +198,7 @@ export(_Server) ->
 	      try xmpp:decode(El, ?NS_CLIENT, [ignore_els]) of
 		  Packet ->
 		      Packet1 = xmpp:set_from_to(Packet, From, To),
-		      Packet2 = misc:add_delay_info(
+		      Packet2 = xmpp_util:add_delay_info(
 				  Packet1, jid:make(LServer),
 				  TimeStamp, <<"Offline Storage">>),
 		      XML = fxml:element_to_binary(xmpp:encode(Packet2)),
@@ -219,7 +208,7 @@ export(_Server) ->
                            "server_host=%(LServer)s",
                            "xml=%(XML)s"])]
 	      catch _:{xmpp_codec, Why} ->
-		      ?ERROR_MSG("Failed to decode packet ~p of user ~ts@~ts: ~ts",
+		      ?ERROR_MSG("failed to decode packet ~p of user ~s@~s: ~s",
 				 [El, LUser, LServer, xmpp:format_error(Why)]),
 		      []
 	      end;
@@ -238,7 +227,7 @@ xml_to_offline_msg(XML) ->
 	#xmlel{} = El ->
 	    el_to_offline_msg(El);
 	Err ->
-	    ?ERROR_MSG("Got ~p when parsing XML packet ~ts",
+	    ?ERROR_MSG("got ~p when parsing XML packet ~s",
 		       [Err, XML]),
 	    Err
     end.
@@ -254,10 +243,10 @@ el_to_offline_msg(El) ->
 			  to = To,
 			  packet = El}}
     catch _:{bad_jid, To_s} ->
-	    ?ERROR_MSG("Failed to get 'to' JID from offline XML ~p", [El]),
+	    ?ERROR_MSG("failed to get 'to' JID from offline XML ~p", [El]),
 	    {error, bad_jid_to};
 	  _:{bad_jid, From_s} ->
-	    ?ERROR_MSG("Failed to get 'from' JID from offline XML ~p", [El]),
+	    ?ERROR_MSG("failed to get 'from' JID from offline XML ~p", [El]),
 	    {error, bad_jid_from}
     end.
 
@@ -267,15 +256,9 @@ get_and_del_spool_msg_t(LServer, LUser) ->
 		    ejabberd_sql:sql_query_t(
                       ?SQL("select @(username)s, @(xml)s from spool where "
                            "username=%(LUser)s and %(LServer)H order by seq;")),
-		DResult =
-		    ejabberd_sql:sql_query_t(
-                      ?SQL("delete from spool where"
-                           " username=%(LUser)s and %(LServer)H;")),
-		case {Result, DResult} of
-		    {{selected, Rs}, {updated, DC}} when length(Rs) /= DC ->
-			ejabberd_sql:restart(concurent_insert);
-		    _ ->
-			Result
-		end
+		ejabberd_sql:sql_query_t(
+                  ?SQL("delete from spool where"
+                       " username=%(LUser)s and %(LServer)H;")),
+		Result
 	end,
     ejabberd_sql:sql_transaction(LServer, F).

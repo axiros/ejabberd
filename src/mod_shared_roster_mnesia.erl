@@ -4,7 +4,7 @@
 %%% Created : 14 Apr 2016 by Evgeny Khramtsov <ekhramtsov@process-one.net>
 %%%
 %%%
-%%% ejabberd, Copyright (C) 2002-2020   ProcessOne
+%%% ejabberd, Copyright (C) 2002-2018   ProcessOne
 %%%
 %%% This program is free software; you can redistribute it and/or
 %%% modify it under the terms of the GNU General Public License as
@@ -32,7 +32,7 @@
 	 get_user_groups/2, get_group_explicit_users/2,
 	 get_user_displayed_groups/3, is_user_in_group/3,
 	 add_user_to_group/3, remove_user_from_group/3, import/3]).
--export([need_transform/1, transform/1, use_cache/1]).
+-export([need_transform/1, transform/1]).
 
 -include("mod_roster.hrl").
 -include("mod_shared_roster.hrl").
@@ -55,10 +55,6 @@ list_groups(Host) ->
     mnesia:dirty_select(sr_group,
 			[{#sr_group{group_host = {'$1', '$2'}, _ = '_'},
 			  [{'==', '$2', Host}], ['$1']}]).
-
--spec use_cache(binary()) -> boolean().
-use_cache(_Host) ->
-    false.
 
 groups_with_opts(Host) ->
     Gs = mnesia:dirty_select(sr_group,
@@ -148,27 +144,17 @@ import(LServer, <<"sr_user">>, [SJID, Group, _TimeStamp]) ->
     User = #sr_user{us = {U, S}, group_host = {Group, LServer}},
     mnesia:dirty_write(User).
 
-need_transform({sr_group, {G, H}, _})
+need_transform(#sr_group{group_host = {G, H}})
   when is_list(G) orelse is_list(H) ->
     ?INFO_MSG("Mnesia table 'sr_group' will be converted to binary", []),
     true;
-need_transform({sr_user, {U, S}, {G, H}})
+need_transform(#sr_user{us = {U, S}, group_host = {G, H}})
   when is_list(U) orelse is_list(S) orelse is_list(G) orelse is_list(H) ->
     ?INFO_MSG("Mnesia table 'sr_user' will be converted to binary", []),
-    true;
-need_transform({sr_group, {_, _}, [{name, _} | _]}) ->
-    ?INFO_MSG("Mnesia table 'sr_group' will be converted from option Name to Label", []),
     true;
 need_transform(_) ->
     false.
 
-transform(#sr_group{group_host = {G, _H}, opts = Opts} = R)
-  when is_binary(G)  ->
-    Opts2 = case proplists:get_value(name, Opts, false) of
-	false -> Opts;
-	Name -> [{label, Name} | proplists:delete(name, Opts)]
-    end,
-    R#sr_group{opts = Opts2};
 transform(#sr_group{group_host = {G, H}, opts = Opts} = R) ->
     R#sr_group{group_host = {iolist_to_binary(G), iolist_to_binary(H)},
 	       opts = mod_shared_roster:opts_to_binary(Opts)};
